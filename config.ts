@@ -45,8 +45,8 @@ export default {
       // undefined fields will be ignored
       handler: "./src/custom/handlers/position.ts",
       entity: `Position(
-        positionId indexed bytes12,
-        trader indexed bytes32,
+        positionId indexed uint256,
+        trader indexed address,
         symbol bytes32,
         openQuantity uint256,
         openCost uint256,
