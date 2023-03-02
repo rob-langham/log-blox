@@ -29,7 +29,7 @@ function ethereumTypeToPostgresType(ethereumType: string) {
       return "BOOLEAN";
     case "int":
     case "uint":
-      return "BIGINT";
+      return "NUMERIC";
     case "string":
       return "TEXT";
     case "bytes":

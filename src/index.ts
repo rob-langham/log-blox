@@ -1,5 +1,5 @@
 import { WebSocketProvider } from "@ethersproject/providers";
-import { Contract, Event } from "ethers";
+import { BigNumber, Contract, Event } from "ethers";
 import { gql, GraphQLClient } from "graphql-request";
 import {
   tap,
@@ -13,62 +13,20 @@ import {
   switchMap,
   interval,
   take,
+  merge,
+  of,
 } from "rxjs";
 
 import { filter } from "rxjs/operators";
 import { createMapperMetaDataFromAbi } from "./tools/schema-generator";
 
+//TODO move to a config util
+import { config, loadSchemaMetadata } from "./bin/generate-schemas";
+
 const client = new GraphQLClient("http://localhost:8080/v1/graphql");
 client.setHeader("x-hasura-admin-secret", "myadminsecretkey");
 
 const provider = new WebSocketProvider("ws://192.168.0.124:8548");
-
-const contangoYieldAbi: any = require("../abis/ContangoYield.json");
-
-const contangoYield = new Contract(
-  "0x30E7348163016B3b6E1621A3Cb40e8CF33CE97db",
-  contangoYieldAbi
-).connect(provider);
-
-console.log("Listening for events...", "\n");
-
-type MapperMetadata = ReturnType<typeof createMapperMetaDataFromAbi>[number];
-const mapperMetadata: Record<MapperMetadata["eventName"], MapperMetadata> = Object.fromEntries(
-  createMapperMetaDataFromAbi(contangoYieldAbi).map((meta) => [meta.eventName, meta] as const)
-);
-
-// console.dir(mapperMetadata, { depth: 5 });
-// process.exit(0);
-
-const eventNames: Record<string, string> = Object.entries(contangoYield.filters)
-  .filter(([eventName]) => eventName.includes("(")) // Keep events with arguments
-  .map(([eventName, eventFilter]) => [(eventFilter as Function)().topics?.[0] as string, eventName])
-  .reduce(
-    (acc, [topic, eventName]) => ({
-      ...acc,
-      [topic]: eventName,
-    }),
-    {}
-  );
-
-// This is a hack to connect mapper metadata to events
-// TODO: Change the metadata to use the event signature instead of the event name
-const simpleEventNames: Record<string, string> = Object.entries(contangoYield.filters)
-  .filter(([eventName]) => !eventName.includes("(")) // Keep events with arguments
-  .map(([eventName, eventFilter]) => [(eventFilter as Function)().topics?.[0] as string, eventName])
-  .reduce(
-    (acc, [topic, eventName]) => ({
-      ...acc,
-      [topic]: eventName,
-    }),
-    {}
-  );
-
-const eventFilter = {
-  topics: [Object.keys(eventNames)],
-  address: contangoYield.address,
-};
-// const hasuraClient = new HasuraClient<ResolversTypes>("http://localhost:8080/v1/graphql");
 
 const savedBlocks = new Set<string>();
 savedBlocks.add("");
@@ -87,8 +45,9 @@ digester
   .pipe(
     mergeMap(
       ([blockHash, fn]: [string, () => Promise<any>]) =>
-        interval(100).pipe(
-          filter(() => !savedBlocks.has(blockHash)),
+        // wait for the block to be saved
+        merge(of(0), interval(100)).pipe(
+          filter(() => savedBlocks.has(blockHash)),
           take(1),
           switchMap(() =>
             new Observable((subscriber) => {
@@ -111,32 +70,126 @@ digester
   )
   .subscribe();
 
-contangoYield.queryFilter(eventFilter, 0).then((logs: Event[]) => {
-  console.log("Received logs", logs.length);
-  logs.forEach((log) => {
-    const eventName = eventNames[log.topics[0]];
-    const eventArgs = contangoYield.interface.decodeEventLog(eventName, log.data, log.topics);
-    // console.log(eventName, contangoYield.interface.decodeEventLog(eventName, log.data, log.topics));
-    const mapper = mapperMetadata[simpleEventNames[log.topics[0]]];
-    digester.next([
-      "",
-      async () => {
-        // save block
-        if (!savedBlocks.has(log.blockHash)) {
-          await client.request(
-            gql`
-                mutation CreateBlock {
-                  insert_blocks(objects: {id: "${log.blockHash}", hash: "${log.blockHash}", number: "${log.blockNumber}"}) {
-                    affected_rows
+main().catch(console.error);
+
+async function main() {
+  const { addresses } = config;
+  const metadata = loadSchemaMetadata();
+
+  for (const contractMetadata of metadata) {
+    const {
+      tableMetadata,
+      config: { contractName, schema },
+    } = contractMetadata;
+
+    const contract = new Contract(
+      addresses[contractName]["arbitrum"],
+      contractMetadata.abis
+    ).connect(provider);
+
+    const metadataByEvent = Object.fromEntries(
+      tableMetadata.map((table) => [table.eventName, table])
+    );
+
+    // map of topics to event signatures
+    const eventNames: Record<
+      string,
+      {
+        signature: string;
+        name: string;
+        topic0: string;
+      }
+    > = Object.fromEntries(
+      Object.entries(contract.filters)
+        .filter(([eventName]) => eventName.includes("(")) // Keep events with arguments
+        .map(([eventName, eventFilter]) => [
+          (eventFilter as Function)().topics?.[0] as string,
+          {
+            signature: eventName,
+            name: eventName.substring(0, eventName.indexOf("(")),
+            topic0: (eventFilter as Function)().topics?.[0] as string,
+          },
+        ])
+    );
+
+    // create an event filter for all events
+    const all = {
+      topics: [Object.keys(eventNames)],
+      address: contract.address,
+    };
+
+    contract.queryFilter(all, 0).then((logs: Event[]) => {
+      console.log("Received logs", logs.length);
+      logs.forEach((log) => {
+        const eventName = eventNames[log.topics[0]];
+        const eventArgs = contract.interface.decodeEventLog(
+          eventName.signature,
+          log.data,
+          log.topics
+        );
+        const mapper = metadataByEvent[eventName.name];
+
+        digester.next([
+          "",
+          async () => {
+            // save block
+            if (!savedBlocks.has(log.blockHash)) {
+              console.log("Processing block", log.blockNumber, log.blockHash);
+              await client.request(
+                gql`
+                  mutation CreateBlock {
+                    insert_blocks_one(object: {id: "${log.blockHash}", hash: "${log.blockHash}", number: "${log.blockNumber}"}, on_conflict: {constraint: blocks_hash_key}) {
+                      id
+                    }
                   }
+                `
+              );
+              onBlockSaved.next(log.blockHash);
+            }
+            return Promise.resolve();
+          },
+        ]);
+
+        const bigNumberToString = (value: any) => {
+          return value._isBigNumber ? value.toString() : value;
+        };
+
+        digester.next([
+          log.blockHash,
+          async () => {
+            console.log(
+              "Processing event",
+              eventName.name,
+              log.blockNumber,
+              log.logIndex,
+              log.blockHash
+            );
+            const args = mapper.fields
+              .map(
+                (field) =>
+                  `${field.columnName}: "${field.eventArgsPath.reduce(
+                    (acc, key) => acc[key],
+                    bigNumberToString(eventArgs)
+                  )}"`
+              )
+              .join(", ");
+            const columns = mapper.fields.map((field) => field.columnName).join(",");
+            const mutation = gql`
+              mutation UpsertRecord {
+                insert_${schema}_${mapper.tableName}_one(object: { id: "${
+              (BigInt(log.blockNumber) * BigInt(1e3)).toString() + log.logIndex
+            }", ${args} }, on_conflict: {constraint: ${
+              mapper.tableName
+            }_pkey, update_columns: [${columns}]}) {
+                  id
                 }
-              `
-          );
-          onBlockSaved.next(log.blockHash);
-        }
-        return Promise.resolve();
-      },
-    ]);
-    digester.next([log.blockHash, () => Promise.resolve()]);
-  });
-});
+              }
+            `;
+
+            client.request(mutation);
+          },
+        ]);
+      });
+    });
+  }
+}

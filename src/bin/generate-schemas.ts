@@ -3,29 +3,30 @@ import { createMapperMetaDataFromAbi } from "../tools/schema-generator";
 import { groupBy, filter, property, isEqual, uniqBy, map } from "lodash";
 import { Axios } from "axios";
 
-const config = {
-  endpoint: "http://localhost:8080",
-  rpcs: {
-    arbitrum: "ws://192.168.0.124:8547",
-  },
-  abis: "./abis",
-  contracts: [
-    {
-      network: "arbitrum",
-      schema: "contango",
-      address: "0x30E7348163016B3b6E1621A3Cb40e8CF33CE97db",
-      abis: ["ContangoYield", "YieldStorageLib"],
-      excludeEvents: [],
-    },
-    {
-      network: "arbitrum",
-      schema: "contango",
-      address: "0x44386ddB4C44E7CB8981f97AF89E928Ddd4258DD",
-      abis: ["YieldCauldron"],
-      excludeEvents: [],
-    },
-  ],
-};
+export interface Config {
+  endpoint: string;
+  rpcs: Record<string, string>;
+  abis: string;
+  addresses: {
+    [contractName: string]: {
+      [network: string]: string;
+    };
+  };
+  contracts: {
+    schema: string;
+    abis: string[];
+    excludeEvents: string[];
+    contractName: string;
+  }[];
+  customHandlers: {
+    triggers: string[];
+    handler: string;
+    entity: string;
+    immutable: boolean;
+  }[];
+}
+
+export const config: Config = require("../../config").default;
 
 type TupleEventInput = {
   name: string;
@@ -49,7 +50,7 @@ const { endpoint, rpcs, abis } = config;
 
 export function loadSchemaMetadata() {
   return config.contracts.map((contract) => {
-    const { network, schema, address, abis: contractAbis, excludeEvents } = contract;
+    const { schema, abis: contractAbis, excludeEvents, contractName } = contract;
 
     const mergedAbis = contractAbis.flatMap((contractAbi) => {
       const file = abis + "/" + contractAbi + ".json";
@@ -98,7 +99,7 @@ async function main() {
   const schemaMetadata = loadSchemaMetadata();
 
   for (let { config, tableMetadata } of schemaMetadata) {
-    const { network, schema, address, abis: contractAbis, excludeEvents } = config;
+    const { schema, abis: contractAbis, excludeEvents } = config;
 
     let blockTableCreated = false;
 
@@ -116,9 +117,9 @@ async function main() {
     async function runMigration(tableInfo: (typeof tableMetadata)[number]) {
       const columns = [
         "('blockHash', 'text')", // FK
-        // "('blockNumber', 'bigint')", // probably not needed. block number can be added to the log index for sorting
+        // "('blockNumber', 'numeric')", // probably not needed. block number can be added to the log index for sorting
         "('transactionHash', 'text')",
-        "('logIndex', 'bigint')",
+        "('logIndex', 'numeric')",
         tableInfo.fields
           .map((field) => `('${field.columnName}', '${field.columnType}')`)
           .join(", "),
@@ -126,7 +127,7 @@ async function main() {
       const createTableStatement = `call create_table_if_not_exists('${schema}'::text, '${tableInfo.tableName}'::text, ARRAY[${columns}]::column_tuple[]);`;
 
       if (!blockTableCreated) {
-        const createBlockTableStatement = `call create_table_if_not_exists('public', 'blocks', ARRAY[('hash', 'text'), ('number', 'bigint'), ('timestamp', 'bigint')]::column_tuple[])`;
+        const createBlockTableStatement = `call create_table_if_not_exists('public', 'blocks', ARRAY[('hash', 'text'), ('number', 'numeric'), ('timestamp', 'numeric')]::column_tuple[])`;
 
         console.log(createBlockTableStatement);
         const blockTableResponse = await axios.post(
