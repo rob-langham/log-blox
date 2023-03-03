@@ -8,16 +8,20 @@ export interface Config {
   rpcs: Record<string, string>;
   abis: string;
   addresses: {
-    [contractName: string]: {
-      [network: string]: string;
+    [schema: string]: {
+      [contractName: string]: {
+        [network: string]: string;
+      };
     };
   };
   contracts: {
-    schema: string;
-    abis: string[];
-    excludeEvents: string[];
-    contractName: string;
-  }[];
+    [schema: string]: {
+      [contractName: string]: {
+        abis: string[];
+        excludeEvents: string[];
+      };
+    };
+  };
   customHandlers: {
     triggers: string[];
     handler: string;
@@ -48,58 +52,62 @@ const adminSecret = "myadminsecretkey";
 
 const { endpoint, rpcs, abis } = config;
 
-export function loadSchemaMetadata() {
-  return config.contracts.map((contract) => {
-    const { schema, abis: contractAbis, excludeEvents, contractName } = contract;
+export function* loadSchemaMetadata() {
+  for (const schema in config.contracts) {
+    for (const contractName in config.contracts[schema]) {
+      const contract = config.contracts[schema][contractName];
 
-    const mergedAbis = contractAbis.flatMap((contractAbi) => {
-      const file = abis + "/" + contractAbi + ".json";
-      return JSON.parse(readFileSync(file).toString("utf8"));
-    });
+      const { abis: contractAbis, excludeEvents } = contract;
 
-    function signature(abi: { inputs: EventInput[] }) {
-      return "(" + abi.inputs.map((i: any) => i.type).join(",") + ")";
-    }
+      const mergedAbis = contractAbis.flatMap((contractAbi) => {
+        const file = abis + "/" + contractAbi + ".json";
+        return JSON.parse(readFileSync(file).toString("utf8"));
+      });
 
-    const conflicts = filter(
-      groupBy(
-        uniqBy(
-          filter(mergedAbis, (i) => i.type === "event").map((i) => ({
-            name: i.name,
-            signature: i.name + signature(i),
-          })),
-          "signature"
+      function signature(abi: { inputs: EventInput[] }) {
+        return "(" + abi.inputs.map((i: any) => i.type).join(",") + ")";
+      }
+
+      const conflicts = filter(
+        groupBy(
+          uniqBy(
+            filter(mergedAbis, (i) => i.type === "event").map((i) => ({
+              name: i.name,
+              signature: i.name + signature(i),
+            })),
+            "signature"
+          ),
+          "name"
         ),
-        "name"
-      ),
-      (v) => v.length > 1
-    ).map((v) => map(v, "signature").join(", "));
+        (v) => v.length > 1
+      ).map((v) => map(v, "signature").join(", "));
 
-    if (conflicts.length) {
-      console.error("Conflicting events found in ABI files: \n\t" + conflicts.join("\t"));
-      console.error("Conflict resolution needs to be configured before continuing. Try:");
-      console.error(
-        "\t1. Exclude all or all but one of the conflicting events in 'contracts[].excludeEvents' of the config file"
-      );
-      console.error(
-        "\t2. Set a resolution strategy in 'contracts[].mergeEvents' of the config file"
-      );
-      // todo :: add a resolution strategy, with union, intersection manual signature
-      process.exit(1);
+      if (conflicts.length) {
+        console.error("Conflicting events found in ABI files: \n\t" + conflicts.join("\t"));
+        console.error("Conflict resolution needs to be configured before continuing. Try:");
+        console.error(
+          "\t1. Exclude all or all but one of the conflicting events in 'contracts[].excludeEvents' of the config file"
+        );
+        console.error(
+          "\t2. Set a resolution strategy in 'contracts[].mergeEvents' of the config file"
+        );
+        // todo :: add a resolution strategy, with union, intersection manual signature
+        process.exit(1);
+      }
+      yield {
+        schema,
+        contractName,
+        abis: mergedAbis,
+        config: contract,
+        tableMetadata: createMapperMetaDataFromAbi(mergedAbis),
+      };
     }
-    return {
-      abis: mergedAbis,
-      config: contract,
-      tableMetadata: createMapperMetaDataFromAbi(mergedAbis),
-    };
-  });
+  }
 }
 
-async function main() {
-  const schemaMetadata = loadSchemaMetadata();
-
-  for (let { config, tableMetadata } of schemaMetadata) {
-    const { schema, abis: contractAbis, excludeEvents } = config;
+export async function migrate() {
+  for (let { schema, contractName, config, tableMetadata } of loadSchemaMetadata()) {
+    // const { abis: contractAbis, excludeEvents } = config;
 
     let blockTableCreated = false;
 
@@ -120,6 +128,7 @@ async function main() {
         // "('blockNumber', 'numeric')", // probably not needed. block number can be added to the log index for sorting
         "('transactionHash', 'text')",
         "('logIndex', 'numeric')",
+        "('sortIndex', 'numeric')",
         tableInfo.fields
           .map((field) => `('${field.columnName}', '${field.columnType}')`)
           .join(", "),
@@ -127,7 +136,7 @@ async function main() {
       const createTableStatement = `call create_table_if_not_exists('${schema}'::text, '${tableInfo.tableName}'::text, ARRAY[${columns}]::column_tuple[]);`;
 
       if (!blockTableCreated) {
-        const createBlockTableStatement = `call create_table_if_not_exists('public', 'blocks', ARRAY[('hash', 'text'), ('number', 'numeric'), ('timestamp', 'numeric')]::column_tuple[])`;
+        const createBlockTableStatement = `call create_table_if_not_exists('public', 'blocks', ARRAY[('number', 'numeric')]::column_tuple[])`;
 
         console.log(createBlockTableStatement);
         const blockTableResponse = await axios.post(
@@ -140,13 +149,6 @@ async function main() {
                 args: {
                   source: "default",
                   sql: createBlockTableStatement,
-                },
-              },
-              {
-                type: "run_sql",
-                args: {
-                  source: "default",
-                  sql: 'alter table "public"."blocks" add constraint "blocks_hash_key" unique ("hash");',
                 },
               },
             ],
@@ -202,7 +204,7 @@ async function main() {
                   add constraint "${tableInfo.tableName}_blockHash_fkey"
                   foreign key ("blockHash")
                   references "public"."blocks"
-                  ("hash") on update no action on delete cascade;`,
+                  ("id") on update no action on delete cascade;`,
           },
         })
       );
@@ -262,4 +264,4 @@ async function main() {
   }
 }
 
-main().catch(console.error);
+// smain().catch(console.error);

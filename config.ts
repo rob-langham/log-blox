@@ -6,34 +6,49 @@ export default {
   },
   abis: "./abis",
   addresses: {
-    ContangoYield: {
-      arbitrum: "0x30E7348163016B3b6E1621A3Cb40e8CF33CE97db",
-      // mainnet: "0x30E7348163016B3b6E1621A3Cb40e8CF33CE97db",
+    //schema
+    contango: {
+      //contract
+      ContangoYield: {
+        //network
+        arbitrum: "0x30E7348163016B3b6E1621A3Cb40e8CF33CE97db",
+        // mainnet: "0x30E7348163016B3b6E1621A3Cb40e8CF33CE97db",
+      },
+      YieldCauldron: {
+        arbitrum: "0x44386ddB4C44E7CB8981f97AF89E928Ddd4258DD",
+        // mainnet: "0x44386ddB4C44E7CB8981f97AF89E928Ddd4258DD",
+      },
     },
-    YieldCauldron: {
-      arbitrum: "0x44386ddB4C44E7CB8981f97AF89E928Ddd4258DD",
-      // mainnet: "0x44386ddB4C44E7CB8981f97AF89E928Ddd4258DD",
+    yield: {
+      YieldCauldron: {
+        arbitrum: "0x23cc87FBEBDD67ccE167Fa9Ec6Ad3b7fE3892E30",
+        // mainnet: "0x44386ddB4C44E7CB8981f97AF89E928Ddd4258DD",
+      },
+      YieldWitch: {
+        arbitrum: "0x23cc87FBEBDD67ccE167Fa9Ec6Ad3b7fE3892E30",
+        // mainnet: "0x44386ddB4C44E7CB8981f97AF89E928Ddd4258DD",
+      },
     },
   },
-  contracts: [
-    {
-      contractName: "ContangoYield",
-      network: "arbitrum",
-      schema: "contango",
-      address: "0x30E7348163016B3b6E1621A3Cb40e8CF33CE97db",
-      abis: ["ContangoYield", "YieldStorageLib"],
-      excludeEvents: [],
+  contracts: {
+    contango: {
+      ContangoYield: {
+        abis: ["ContangoYield", "YieldStorageLib"],
+        excludeEvents: [],
+      },
+      YieldCauldron: {
+        abis: ["YieldCauldron"],
+        excludeEvents: [],
+        customHandlers: [],
+      },
     },
-    {
-      contractName: "YieldCauldron",
-      network: "arbitrum",
-      schema: "contango",
-      address: "0x44386ddB4C44E7CB8981f97AF89E928Ddd4258DD",
-      abis: ["YieldCauldron"],
-      excludeEvents: [],
-      customHandlers: [],
+    yield: {
+      YieldCauldron: {
+        abis: ["YieldCauldron"],
+        excludeEvents: [],
+      },
     },
-  ],
+  },
   customHandlers: [
     {
       triggers: [
