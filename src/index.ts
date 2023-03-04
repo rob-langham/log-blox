@@ -1,20 +1,50 @@
 import { WebSocketProvider } from "@ethersproject/providers";
 import { BigNumber, Contract, Event, EventFilter } from "ethers";
 import { GraphQLClient } from "graphql-request";
-import { attempt, chunk, groupBy, mapValues, sortBy, sum, sumBy } from "lodash";
-import { defer, from, mergeMap, Observable, of, Subject, take, timer } from "rxjs";
+import {
+  attempt,
+  chunk,
+  delay,
+  groupBy,
+  mapValues,
+  sortBy,
+  sortedIndex,
+  sortedIndexOf,
+  sum,
+  sumBy,
+} from "lodash";
+import {
+  defer,
+  from,
+  mergeMap,
+  Observable,
+  of,
+  merge,
+  ReplaySubject,
+  Subject,
+  take,
+  timer,
+  EMPTY,
+  ObservableInput,
+} from "rxjs";
 
 import {
   auditTime,
   bufferTime,
   concatAll,
   concatMap,
+  concatWith,
   filter,
+  ignoreElements,
   map,
+  mergeScan,
   retry,
   retryWhen,
+  scan,
   share,
+  skip,
   switchMap,
+  tap,
 } from "rxjs/operators";
 
 //TODO move to a config util
@@ -27,6 +57,15 @@ const provider = new WebSocketProvider("ws://192.168.0.124:8548");
 
 const savedBlocks = new Set<string>();
 savedBlocks.add("");
+
+type KeyedEvent = {
+  metadataKey: string;
+  log: Event;
+};
+
+function sortIndexOf(event: KeyedEvent) {
+  return BigInt(event.log.blockNumber) * BigInt(1e6) + BigInt(event.log.logIndex);
+}
 
 const blocks$ = new Observable<number>((subscriber) => {
   const onBlock = (blockNumber: number) => {
@@ -256,88 +295,170 @@ async function main() {
    *   1. Custom entities need to be able to be restored from the last confirmed block
    *   2. Events received out of order should error with a check contraint
    *   3. Custom entities need to be created on the fly, with an archive table
+   *
+   *
    */
 
+  const historyComplete$ = new Subject();
+
+  const liveEvents$: Observable<KeyedEvent> = new Observable<{
+    metadataKey: string;
+    log: Event;
+  }>((subscriber) => {
+    console.log("Subscribing to live events");
+    contractFilters.map(
+      async ({ filters, contract, metadataKey }) =>
+        [
+          metadataKey,
+          contract.on(filters, (...args) => {
+            console.log("Received event:", args[args.length - 1]);
+            subscriber.next({
+              metadataKey,
+              log: args[args.length - 1],
+            });
+          }),
+        ] as const
+    );
+  }).pipe(
+    (liveEvents$) =>
+      new Observable<{
+        metadataKey: string;
+        log: Event;
+      }>((subscriber) => {
+        let cachedEvents: KeyedEvent[] | null = [];
+        historyComplete$.subscribe({
+          complete: () => {
+            cachedEvents!.forEach((event) => subscriber.next(event));
+            cachedEvents = null;
+            console.log("Disabling live event cache");
+          },
+        });
+        liveEvents$.subscribe({
+          next: (event) => {
+            if (cachedEvents) {
+              cachedEvents.push(event);
+            } else {
+              subscriber.next(event);
+            }
+          },
+        });
+      })
+  );
+
+  const historicEvents$: Observable<KeyedEvent> = batches$.pipe(
+    concatMap(async ([from, to]) => {
+      console.log(`Querying logs for blocks: ${from} -> ${to}`);
+      return retryAndBackoff(() =>
+        Promise.all(
+          contractFilters.map(
+            async ({ filters, contract, metadataKey }) =>
+              [metadataKey, await contract.queryFilter(filters, from, to)] as const
+          )
+        ).then((logs) => {
+          console.log(
+            `Retrieved ${sumBy(logs, (l) => l[1].length)} logs for blocks ${from} -> ${to}`
+          );
+          return logs.flatMap(([metadataKey, logs]) => logs.map((log) => ({ metadataKey, log })));
+        })
+      );
+    }),
+    concatAll(),
+    map((logs) => sortBy(logs, (log) => sortIndexOf(log))),
+    concatMap((logs) => from(logs))
+  );
+
+  const startUpDelay = () => {
+    if (process.env.MODE?.toLowerCase() === "dev") {
+      return of(1).pipe(tap(() => console.log("Not delaying startup")));
+    }
+
+    return timer(30e3);
+  };
   // go through each batch of blocks one at a time, in order
-  batches$
-    .pipe(
-      concatMap(async ([from, to]) => {
-        console.log(`Querying logs for blocks: ${from} -> ${to}`);
-        return retryAndBackoff(() =>
-          Promise.all(
-            contractFilters.map(
-              async ({ filters, contract, metadataKey }) =>
-                [metadataKey, await contract.queryFilter(filters, from, to)] as const
+  merge(
+    liveEvents$,
+    // wait 30 seconds before starting to query historic events
+    // this is to ensure that the live events are subscribed to first
+    // which will prevent any events from being missed
+    startUpDelay().pipe(
+      switchMap(() =>
+        historicEvents$.pipe(
+          concatWith(
+            of(1).pipe(
+              tap(() => historyComplete$.complete()),
+              ignoreElements()
             )
-          ).then((logs) => {
-            console.log(
-              `Retrieved ${sumBy(logs, (l) => l[1].length)} logs for blocks ${from} -> ${to}`
-            );
-            return logs.flatMap(([metadataKey, logs]) => logs.map((log) => ({ metadataKey, log })));
-          })
+          )
+        )
+      )
+    )
+  )
+    .pipe(
+      scan((acc, event) => {
+        if (!acc || sortIndexOf(acc) < sortIndexOf(event)) {
+          return event;
+        } else if (acc) {
+          console.log("Event recieved out of order:", event);
+        }
+        return null;
+      }, null as null | KeyedEvent),
+      filter((event) => event !== null),
+      map((event) => event!)
+    )
+    .pipe(
+      concatMap(async ({ log, metadataKey }) => {
+        const { contractMetadata, contract, eventNames } =
+          contractFiltersBySchemaAndContract[metadataKey];
+        const { tableMetadata, contractName, schema } = contractMetadata;
+
+        const eventName = eventNames[log.topics[0]];
+        const eventArgs = contract.interface.decodeEventLog(
+          eventName.signature,
+          log.data,
+          log.topics
         );
-      }),
-      concatAll(),
-      map((logs) =>
-        sortBy(logs, ({ log }) => BigInt(log.blockNumber) * BigInt(1e6) + BigInt(log.logIndex))
-      ),
-      concatMap(async (logs) => {
-        logs.forEach(({ log, metadataKey }) => {
-          const { contractMetadata, contract, filters, eventNames } =
-            contractFiltersBySchemaAndContract[metadataKey];
-          const { tableMetadata, contractName, schema } = contractMetadata;
 
-          const eventName = eventNames[log.topics[0]];
-          const eventArgs = contract.interface.decodeEventLog(
-            eventName.signature,
-            log.data,
-            log.topics
-          );
+        //todo put this in the metadata
+        const metadataByEvent = Object.fromEntries(
+          tableMetadata.map((table) => [table.eventName, table])
+        );
 
-          //todo put this in the metadata
-          const metadataByEvent = Object.fromEntries(
-            tableMetadata.map((table) => [table.eventName, table])
-          );
+        const mapper = metadataByEvent[eventName.name];
 
-          const mapper = metadataByEvent[eventName.name];
+        persistor.next({
+          dedupe: `${log.blockNumber}`,
+          mutation: "insert_blocks",
+          object: { id: log.blockHash, number: log.blockNumber },
+          constraint: `{ constraint: blocks_pkey }`,
+        });
 
-          persistor.next({
-            dedupe: `${log.blockNumber}`,
-            mutation: "insert_blocks",
-            object: { id: log.blockHash, number: log.blockNumber },
-            constraint: `{ constraint: blocks_pkey }`,
-          });
+        blockConfirmer.next([log.blockNumber, log.blockHash]);
 
-          blockConfirmer.next([log.blockNumber, log.blockHash]);
+        const bigNumberToString = (value: any) => {
+          return BigNumber.isBigNumber(value) ? value.toBigInt().toString() : value;
+        };
 
-          const bigNumberToString = (value: any) => {
-            return BigNumber.isBigNumber(value) ? value.toBigInt().toString() : value;
-          };
-
-          persistor.next({
-            dedupe: log.blockHash + log.logIndex,
-            mutation: `insert_${schema}_${mapper.tableName}`,
-            object: Object.fromEntries([
-              ["id", (BigInt(log.blockNumber) * BigInt(1e3)).toString() + log.logIndex],
-              ...mapper.fields.map(
-                (field) =>
-                  [
-                    field.columnName,
-                    bigNumberToString(
-                      field.eventArgsPath.reduce((acc, key) => acc[key], eventArgs)
-                    ),
-                  ] as [string, any]
-              ),
-              ["blockHash", log.blockHash],
-              ["transactionHash", log.transactionHash],
-              ["logIndex", log.logIndex],
-              [
-                "sortIndex",
-                (BigInt(log.blockNumber) * BigInt(1e5) + BigInt(log.logIndex)).toString(),
-              ],
-            ]),
-            constraint: `{ constraint: ${mapper.tableName}_pkey }`,
-          });
+        persistor.next({
+          dedupe: log.blockHash + log.logIndex,
+          mutation: `insert_${schema}_${mapper.tableName}`,
+          object: Object.fromEntries([
+            ["id", (BigInt(log.blockNumber) * BigInt(1e3)).toString() + log.logIndex],
+            ...mapper.fields.map(
+              (field) =>
+                [
+                  field.columnName,
+                  bigNumberToString(field.eventArgsPath.reduce((acc, key) => acc[key], eventArgs)),
+                ] as [string, any]
+            ),
+            ["blockHash", log.blockHash],
+            ["transactionHash", log.transactionHash],
+            ["logIndex", log.logIndex],
+            [
+              "sortIndex",
+              (BigInt(log.blockNumber) * BigInt(1e5) + BigInt(log.logIndex)).toString(),
+            ],
+          ]),
+          constraint: `{ constraint: ${mapper.tableName}_pkey }`,
         });
       })
     )

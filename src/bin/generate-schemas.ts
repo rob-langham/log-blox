@@ -2,6 +2,7 @@ import { readFileSync } from "fs";
 import { createMapperMetaDataFromAbi } from "../tools/schema-generator";
 import { groupBy, filter, property, isEqual, uniqBy, map } from "lodash";
 import { Axios } from "axios";
+import { Event } from "ethers";
 
 export interface Config {
   endpoint: string;
@@ -50,7 +51,24 @@ type EventInput =
 //TDOD read from file, or env
 const adminSecret = "myadminsecretkey";
 
-const { endpoint, rpcs, abis } = config;
+const { endpoint, rpcs, abis, customHandlers } = config;
+
+interface HandlerFunction {
+  (event: Event, context: any): Promise<{ [feild: string]: any } | null | undefined>;
+}
+
+export function* loadCustomHandlerMetadata() {
+  for (const handlerConfig of customHandlers) {
+    const { triggers, handler, entity, immutable } = handlerConfig;
+    const handlerFunction = require(handler).default;
+    const eventSources = triggers
+      .map((trigger) => trigger.split(":"))
+      .map(([contractName, eventName]) => ({
+        contractName,
+        eventName,
+      }));
+  }
+}
 
 export function* loadSchemaMetadata() {
   for (const schema in config.contracts) {
@@ -263,5 +281,3 @@ export async function migrate() {
     }
   }
 }
-
-// smain().catch(console.error);

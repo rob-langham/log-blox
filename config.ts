@@ -52,12 +52,17 @@ export default {
   customHandlers: [
     {
       triggers: [
+        // A handler instance is created for each schema where the sources are available
+        //  if the same contract names are available in multiple schemas
+        //  the handler will be run for each schema
         "ContangoYield:PositionUpserted",
         "ContangoYield:PositionLiquidated",
         "ContangoYield:PositionClosed",
       ],
       // This should take the event and return the data to be upserted
       // undefined fields will be ignored
+
+      //create the file if it doesn't exist
       handler: "./src/custom/handlers/position.ts",
       entity: `Position(
         positionId indexed uint256,
