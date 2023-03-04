@@ -73,32 +73,38 @@ possibleReorg$.subscribe((reorg) => {
   console.log("reorg", reorg);
 });
 
-const digester = new Subject<{
+const persistor = new Subject<{
   dedupe: string;
   mutation: string;
   object: any;
   constraint?: string;
 }>();
 
-digester
+persistor
   .pipe(
     bufferTime(1000),
-    map(
-      (actions) =>
-        actions.reduce(
-          (acc, action) => {
-            if (!acc.dedupe.has(action.dedupe)) {
-              acc.dedupe.add(action.dedupe);
-              acc.array.push(action);
-            }
-            return acc;
-          },
-          { array: [] as typeof actions, dedupe: new Set() }
-        ).array
-    ),
+    map((actions) => {
+      const array = actions.reduce(
+        (acc, action) => {
+          if (!acc.dedupe.has(action.dedupe)) {
+            acc.dedupe.add(action.dedupe);
+            acc.array.push(action);
+          }
+          return acc;
+        },
+        { array: [] as typeof actions, dedupe: new Set() }
+      ).array;
+
+      if (array.length != actions.length) {
+        console.log("Deduped", actions.length - array.length, "actions");
+      }
+
+      return array;
+    }),
     mergeMap((actions) =>
       // ensures blocks are persisted before other actions
       from([
+        // a necessary evil to ensure blocks are persisted before other actions
         actions.filter((action) => action.mutation === "insert_blocks"),
         ...chunk(
           // useful when reindexing
@@ -224,6 +230,34 @@ async function main() {
     0
   );
 
+  /**
+   * Thoughts:
+   *
+   * Live events:
+   *   1. Query historic confirmed blocks first
+   *   2. Start listening for live events at the start
+   *   3. Query unconfirmed blocks
+   *   4. Wait for n blocks to be received before querying unconfirmed events
+   *      - Or when historic queries have caught up, whichever is later
+   *      - Use this to ensure there isn't a race condition between the two
+   *      - Make the delay configurable, so that it can be set to 0 for testing
+   *      - This will also ensure that the unconfirmed events are processed in the correct order
+   *
+   * Reorgs:
+   *  1. When a reorg is detected, remove all blocks from the reorged blocks onwards
+   *     - This will also remove all events from the reorged blocks onwards as it should cascade
+   *  2. Stop listening for live events for a short period of time
+   *  3. Cancel all pending persistance queries
+   *  4. Removed events should be a trigger for reorg detection
+   *  5. mutable custom entities need to be restored from the last confirmed block
+   *     - This is to ensure that the custom entities are in a consistent state
+   *
+   * Custom entities:
+   *   1. Custom entities need to be able to be restored from the last confirmed block
+   *   2. Events received out of order should error with a check contraint
+   *   3. Custom entities need to be created on the fly, with an archive table
+   */
+
   // go through each batch of blocks one at a time, in order
   batches$
     .pipe(
@@ -267,7 +301,7 @@ async function main() {
 
           const mapper = metadataByEvent[eventName.name];
 
-          digester.next({
+          persistor.next({
             dedupe: `${log.blockNumber}`,
             mutation: "insert_blocks",
             object: { id: log.blockHash, number: log.blockNumber },
@@ -280,7 +314,7 @@ async function main() {
             return BigNumber.isBigNumber(value) ? value.toBigInt().toString() : value;
           };
 
-          digester.next({
+          persistor.next({
             dedupe: log.blockHash + log.logIndex,
             mutation: `insert_${schema}_${mapper.tableName}`,
             object: Object.fromEntries([
