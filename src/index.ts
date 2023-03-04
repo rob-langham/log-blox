@@ -1,25 +1,21 @@
 import { WebSocketProvider } from "@ethersproject/providers";
-import { BigNumber, Contract, Event } from "ethers";
-import { gql, GraphQLClient } from "graphql-request";
-import { chunk, groupBy } from "lodash";
-import {
-  catchError,
-  concat,
-  delay,
-  from,
-  interval,
-  merge,
-  mergeMap,
-  Observable,
-  of,
-  Subject,
-  switchMap,
-  take,
-  tap,
-  timer,
-} from "rxjs";
+import { BigNumber, Contract, Event, EventFilter } from "ethers";
+import { GraphQLClient } from "graphql-request";
+import { attempt, chunk, groupBy, mapValues, sortBy, sum, sumBy } from "lodash";
+import { defer, from, mergeMap, Observable, of, Subject, take, timer } from "rxjs";
 
-import { auditTime, bufferTime, concatMap, filter, map, share } from "rxjs/operators";
+import {
+  auditTime,
+  bufferTime,
+  concatAll,
+  concatMap,
+  filter,
+  map,
+  retry,
+  retryWhen,
+  share,
+  switchMap,
+} from "rxjs/operators";
 
 //TODO move to a config util
 import { config, loadSchemaMetadata, migrate } from "./bin/generate-schemas";
@@ -113,6 +109,8 @@ digester
     ),
     filter((actions) => actions.length > 0),
     concatMap((persistanceActions) => {
+      console.log("Persisting", persistanceActions.length, "entities");
+
       const persistanceActionsByTable = groupBy(persistanceActions, "mutation");
       const params: string[] = [];
       const variables: any = {};
@@ -150,13 +148,23 @@ digester
 
 main().catch(console.error);
 
+function retryAndBackoff<T = any>(fn: () => Promise<T>): Observable<T> {
+  return defer(() => fn()).pipe(
+    mergeMap((result) => of(result)),
+    retry({
+      count: 5,
+      delay: (_error, attempt: number) => timer(Math.pow(2, attempt) * 1000),
+    })
+  );
+}
+
 async function main() {
   await migrate();
 
   const { addresses } = config;
   const metadata = loadSchemaMetadata();
 
-  for (const contractMetadata of metadata) {
+  const contractFilters = [...metadata].map((contractMetadata) => {
     const { tableMetadata, contractName, schema } = contractMetadata;
 
     const contract = new Contract(
@@ -170,18 +178,12 @@ async function main() {
       contractName,
       addresses[schema][contractName]["arbitrum"]
     );
-
-    const metadataByEvent = Object.fromEntries(
-      tableMetadata.map((table) => [table.eventName, table])
-    );
-
     // map of topics to event signatures
     const eventNames: Record<
       string,
       {
         signature: string;
         name: string;
-        topic0: string;
       }
     > = Object.fromEntries(
       Object.entries(contract.filters)
@@ -191,84 +193,119 @@ async function main() {
           {
             signature: eventName,
             name: eventName.substring(0, eventName.indexOf("(")),
-            topic0: (eventFilter as Function)().topics?.[0] as string,
           },
         ])
     );
 
     // create an event filter for all events
-    const all = {
-      topics: [Object.keys(eventNames)],
-      address: contract.address,
-    };
+    return {
+      metadataKey: `${schema}.${contractName}`,
+      contract,
+      filters: {
+        topics: [Object.keys(eventNames)],
+        address: contract.address,
+      } as EventFilter,
+      contractMetadata,
+      eventNames,
+    } as const;
+  });
 
-    console.log("Processing contract preparing batches", contractName);
+  const head = await provider.getBlockNumber();
+  const batchSize = 1e6;
+  const batches$ = from(
+    new Array(Math.ceil(head / batchSize))
+      .fill(0)
+      .map((_, i) => [i * batchSize, Math.min((i + 1) * batchSize, head)])
+  );
 
-    const head = await provider.getBlockNumber();
-    const batchSize = 1e6;
-    const batches$ = from(
-      new Array(Math.ceil(head / batchSize))
-        .fill(0)
-        .map((_, i) => [i * batchSize, Math.min((i + 1) * batchSize, head)])
-    );
+  // orgainse contract filters by schema and contract name
+  const contractFiltersBySchemaAndContract = mapValues(
+    groupBy(contractFilters, (filter) => filter.metadataKey),
+    0
+  );
 
-    console.log("Processing contract", contractName, "upto", head);
-    batches$
-      .pipe(
-        concatMap(async ([from, to]) => {
-          console.log("Processing blocks", from, to, "of", schema + "." + contractName);
-          await contract.queryFilter(all, from, to).then((logs: Event[]) => {
-            console.log("Received logs", logs.length);
-            logs.forEach((log) => {
-              const eventName = eventNames[log.topics[0]];
-              const eventArgs = contract.interface.decodeEventLog(
-                eventName.signature,
-                log.data,
-                log.topics
-              );
-              const mapper = metadataByEvent[eventName.name];
+  // go through each batch of blocks one at a time, in order
+  batches$
+    .pipe(
+      concatMap(async ([from, to]) => {
+        console.log(`Querying logs for blocks: ${from} -> ${to}`);
+        return retryAndBackoff(() =>
+          Promise.all(
+            contractFilters.map(
+              async ({ filters, contract, metadataKey }) =>
+                [metadataKey, await contract.queryFilter(filters, from, to)] as const
+            )
+          ).then((logs) => {
+            console.log(
+              `Retrieved ${sumBy(logs, (l) => l[1].length)} logs for blocks ${from} -> ${to}`
+            );
+            return logs.flatMap(([metadataKey, logs]) => logs.map((log) => ({ metadataKey, log })));
+          })
+        );
+      }),
+      concatAll(),
+      map((logs) =>
+        sortBy(logs, ({ log }) => BigInt(log.blockNumber) * BigInt(1e6) + BigInt(log.logIndex))
+      ),
+      concatMap(async (logs) => {
+        logs.forEach(({ log, metadataKey }) => {
+          const { contractMetadata, contract, filters, eventNames } =
+            contractFiltersBySchemaAndContract[metadataKey];
+          const { tableMetadata, contractName, schema } = contractMetadata;
 
-              digester.next({
-                dedupe: `${log.blockNumber}`,
-                mutation: "insert_blocks",
-                object: { id: log.blockHash, number: log.blockNumber },
-                constraint: `{ constraint: blocks_pkey }`,
-              });
+          const eventName = eventNames[log.topics[0]];
+          const eventArgs = contract.interface.decodeEventLog(
+            eventName.signature,
+            log.data,
+            log.topics
+          );
 
-              blockConfirmer.next([log.blockNumber, log.blockHash]);
+          //todo put this in the metadata
+          const metadataByEvent = Object.fromEntries(
+            tableMetadata.map((table) => [table.eventName, table])
+          );
 
-              const bigNumberToString = (value: any) => {
-                return BigNumber.isBigNumber(value) ? value.toBigInt().toString() : value;
-              };
+          const mapper = metadataByEvent[eventName.name];
 
-              digester.next({
-                dedupe: log.blockHash + log.logIndex,
-                mutation: `insert_${schema}_${mapper.tableName}`,
-                object: Object.fromEntries([
-                  ["id", (BigInt(log.blockNumber) * BigInt(1e3)).toString() + log.logIndex],
-                  ...mapper.fields.map(
-                    (field) =>
-                      [
-                        field.columnName,
-                        bigNumberToString(
-                          field.eventArgsPath.reduce((acc, key) => acc[key], eventArgs)
-                        ),
-                      ] as [string, any]
-                  ),
-                  ["blockHash", log.blockHash],
-                  ["transactionHash", log.transactionHash],
-                  ["logIndex", log.logIndex],
-                  [
-                    "sortIndex",
-                    (BigInt(log.blockNumber) * BigInt(1e5) + BigInt(log.logIndex)).toString(),
-                  ],
-                ]),
-                constraint: `{ constraint: ${mapper.tableName}_pkey }`,
-              });
-            });
+          digester.next({
+            dedupe: `${log.blockNumber}`,
+            mutation: "insert_blocks",
+            object: { id: log.blockHash, number: log.blockNumber },
+            constraint: `{ constraint: blocks_pkey }`,
           });
-        })
-      )
-      .subscribe();
-  }
+
+          blockConfirmer.next([log.blockNumber, log.blockHash]);
+
+          const bigNumberToString = (value: any) => {
+            return BigNumber.isBigNumber(value) ? value.toBigInt().toString() : value;
+          };
+
+          digester.next({
+            dedupe: log.blockHash + log.logIndex,
+            mutation: `insert_${schema}_${mapper.tableName}`,
+            object: Object.fromEntries([
+              ["id", (BigInt(log.blockNumber) * BigInt(1e3)).toString() + log.logIndex],
+              ...mapper.fields.map(
+                (field) =>
+                  [
+                    field.columnName,
+                    bigNumberToString(
+                      field.eventArgsPath.reduce((acc, key) => acc[key], eventArgs)
+                    ),
+                  ] as [string, any]
+              ),
+              ["blockHash", log.blockHash],
+              ["transactionHash", log.transactionHash],
+              ["logIndex", log.logIndex],
+              [
+                "sortIndex",
+                (BigInt(log.blockNumber) * BigInt(1e5) + BigInt(log.logIndex)).toString(),
+              ],
+            ]),
+            constraint: `{ constraint: ${mapper.tableName}_pkey }`,
+          });
+        });
+      })
+    )
+    .subscribe();
 }
