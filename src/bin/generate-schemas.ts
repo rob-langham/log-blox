@@ -154,7 +154,7 @@ export async function migrate() {
       const createTableStatement = `call create_table_if_not_exists('${schema}'::text, '${tableInfo.tableName}'::text, ARRAY[${columns}]::column_tuple[]);`;
 
       if (!blockTableCreated) {
-        const createBlockTableStatement = `call create_table_if_not_exists('public', 'blocks', ARRAY[('number', 'numeric')]::column_tuple[])`;
+        const createBlockTableStatement = `call create_table_if_not_exists('public', 'blocks', ARRAY[('number', 'numeric'), ('confirmed', 'bool')]::column_tuple[])`;
 
         console.log(createBlockTableStatement);
         const blockTableResponse = await axios.post(
