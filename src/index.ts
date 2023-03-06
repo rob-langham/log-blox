@@ -9,6 +9,7 @@ import {
   merge,
   mergeMap,
   Observable,
+  ObservableInput,
   of,
   ReplaySubject,
   Subject,
@@ -136,12 +137,6 @@ const main$ = restart$.pipe(
           ).pipe(
             mergeMap(([blockNumber, blockHash]) => {
               if (blockNumber < autoconfimedBlock) {
-                console.log(
-                  "block",
-                  blockNumber,
-                  "is autoconfirmed as it's older than",
-                  autoconfimedBlock
-                );
                 return EMPTY;
               } else {
                 console.log("checking validity of block", blockNumber, "against hash", blockHash);
@@ -192,12 +187,21 @@ const main$ = restart$.pipe(
             )
           );
 
-          const persistor = new Subject<{
+          type HasuraPersistanceAction = {
             dedupe: string;
+            type: "hasura";
             mutation: string;
             object: any;
             constraint?: string;
-          }>();
+          };
+
+          type CallbackPersistanceAction = {
+            dedupe: string;
+            type: "callback";
+            callback: () => Promise<void>;
+          };
+
+          const persistor = new Subject<HasuraPersistanceAction | CallbackPersistanceAction>();
 
           subscribe(
             persistor.pipe(
@@ -224,10 +228,14 @@ const main$ = restart$.pipe(
                 // ensures blocks are persisted before other actions
                 from([
                   // a necessary evil to ensure blocks are persisted before other actions
-                  actions.filter((action) => action.mutation === "insert_blocks"),
+                  actions.filter(
+                    (action) => action.type === "hasura" && action.mutation === "insert_blocks"
+                  ),
                   ...chunk(
                     // useful when reindexing
-                    actions.filter((action) => action.mutation !== "insert_blocks"),
+                    actions.filter(
+                      (action) => action.type !== "hasura" || action.mutation !== "insert_blocks"
+                    ),
                     1000
                   ),
                 ])
@@ -236,19 +244,39 @@ const main$ = restart$.pipe(
               concatMap((persistanceActions) => {
                 console.log("Persisting", persistanceActions.length, "entities");
 
-                const persistanceActionsByTable = groupBy(persistanceActions, "mutation");
-                const params: string[] = [];
-                const variables: any = {};
-                const mutations: string[] = [];
+                const mutationsByType = groupBy(persistanceActions, "type");
 
-                for (const mutation in persistanceActionsByTable) {
-                  const actions = persistanceActionsByTable[mutation];
-                  const mutationName = mutation.replace("insert_", "");
-                  const mutationArgs = actions.map((action) => action.object);
-                  const mutationConstraint = actions[0].constraint;
-                  variables[`objects_${mutationName}`] = mutationArgs;
-                  params.push(`$objects_${mutationName}: [${mutationName}_insert_input!]!`);
-                  const mutationQuery = `
+                return from(Object.keys(mutationsByType)).pipe(
+                  concatMap((type) => {
+                    const actions = mutationsByType[type];
+                    if (type === "hasura") {
+                      return persistHasura(actions as HasuraPersistanceAction[]);
+                    } else if (type === "callback") {
+                      return from(actions as CallbackPersistanceAction[]).pipe(
+                        concatMap((action) => action.callback())
+                      );
+                    }
+
+                    return EMPTY;
+                  })
+                );
+
+                function persistHasura(
+                  persistanceActions: HasuraPersistanceAction[]
+                ): ObservableInput<any> {
+                  const persistanceActionsByTable = groupBy(persistanceActions, "mutation");
+                  const params: string[] = [];
+                  const variables: any = {};
+                  const mutations: string[] = [];
+
+                  for (const mutation in persistanceActionsByTable) {
+                    const actions = persistanceActionsByTable[mutation];
+                    const mutationName = mutation.replace("insert_", "");
+                    const mutationArgs = actions.map((action) => action.object);
+                    const mutationConstraint = actions[0].constraint;
+                    variables[`objects_${mutationName}`] = mutationArgs;
+                    params.push(`$objects_${mutationName}: [${mutationName}_insert_input!]!`);
+                    const mutationQuery = `
                       ${mutation}(
                         objects: $objects_${mutationName}
                         ${mutationConstraint ? `, on_conflict: ${mutationConstraint}` : ""}
@@ -256,17 +284,18 @@ const main$ = restart$.pipe(
                         affected_rows
                       }
                     `;
-                  mutations.push(mutationQuery);
-                }
+                    mutations.push(mutationQuery);
+                  }
 
-                return client.request(
-                  `
+                  return client.request(
+                    `
                       mutation (${params.join(", ")}) {
                         ${mutations.join("\n")}
                       }
                     `,
-                  variables
-                );
+                    variables
+                  );
+                }
               })
             )
           );
@@ -352,7 +381,7 @@ const main$ = restart$.pipe(
 
             contractFilters.map(async ({ filters, contract, metadataKey }) => {
               function eventHandler(...args: any[]) {
-                console.log("Received event:", args[args.length - 1]);
+                console.log("Received event:", metadataKey, args[args.length - 1]);
                 subscriber.next({
                   metadataKey,
                   log: args[args.length - 1],
@@ -446,8 +475,16 @@ const main$ = restart$.pipe(
                     concatWith(
                       of(1).pipe(
                         tap(() => {
-                          dataService.confirmBlocksBefore(autoconfimedBlock);
-                          historyComplete$.next(provider.blockNumber);
+                          // blocks are persisted first
+                          persistor.next({
+                            dedupe: "autoconfirm",
+                            type: "callback",
+                            callback: async () => {
+                              console.log("Autoconfirming blocks before", autoconfimedBlock);
+                              await dataService.confirmBlocksBefore(autoconfimedBlock);
+                            },
+                          });
+                          historyComplete$.complete();
                         }),
                         ignoreElements()
                       )
@@ -490,6 +527,7 @@ const main$ = restart$.pipe(
 
                   persistor.next({
                     dedupe: `${log.blockNumber}`,
+                    type: "hasura",
                     mutation: "insert_blocks",
                     object: { id: log.blockHash, number: log.blockNumber, confirmed: false },
                     constraint: `{ constraint: blocks_pkey }`,
@@ -503,6 +541,7 @@ const main$ = restart$.pipe(
 
                   persistor.next({
                     dedupe: log.blockHash + log.logIndex,
+                    type: "hasura",
                     mutation: `insert_${schema}_${mapper.tableName}`,
                     object: Object.fromEntries([
                       ["id", (BigInt(log.blockNumber) * BigInt(1e3)).toString() + log.logIndex],
@@ -538,7 +577,7 @@ const main$ = restart$.pipe(
 );
 
 (async function () {
-  // await migrate();
+  await migrate();
   main$.subscribe();
 })().catch((err) => {
   console.error(err);
