@@ -20,6 +20,7 @@
     "ethers": "^5.7.2",
     "graphql": "^14.7.0",
     "lodash": "^4.17.21",
+    "pg": "^8.9.0",
     "rxjs": "^7.8.0"
   },
   "devDependencies": {
@@ -28,6 +29,7 @@
     "@graphql-codegen/typescript-resolvers": "3.1.0",
     "@typechain/ethers-v5": "^10.2.0",
     "@types/node": "^18.14.2",
+    "@types/pg": "^8.6.6",
     "get-graphql-schema": "^2.1.2",
     "graphql-request": "^5.1.0",
     "ts-node": "^10.9.1",
