@@ -42,7 +42,6 @@ const mutations = mutationRoot.filter((m: any) => m.args.find((a: any) => a.name
 mutations.forEach((m: any) => {
   const name = m.name;
   const objectsType: string = typeToString(m.args.find((a: any) => a.name === "objects").type);
-
   const camelCasedName = name.replace(/_[a-z]/gi, (x: string) => x.substring(1).toUpperCase());
   const meta = {
     field: camelCasedName,
