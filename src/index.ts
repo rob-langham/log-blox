@@ -1,7 +1,7 @@
 import { WebSocketProvider } from "@ethersproject/providers";
 import { BigNumber, Contract, Event, EventFilter } from "ethers";
 import { GraphQLClient } from "graphql-request";
-import { chunk, groupBy, head, mapValues, sortBy, sumBy } from "lodash";
+import _ from "lodash";
 import {
   defer,
   EMPTY,
@@ -13,14 +13,12 @@ import {
   of,
   ReplaySubject,
   Subject,
-  take,
   timer,
 } from "rxjs";
 
 import {
   auditTime,
   bufferTime,
-  combineLatestWith,
   concatAll,
   concatMap,
   concatWith,
@@ -33,7 +31,6 @@ import {
   skip,
   startWith,
   switchMap,
-  takeUntil,
   takeWhile,
   tap,
   timeInterval,
@@ -62,7 +59,7 @@ const dataService = new DataService();
 const main$ = restart$.pipe(
   startWith(void 0),
   switchMap(
-    (_, iteration) =>
+    (__, iteration) =>
       new Observable(() => {
         const subscriptions: (() => void)[] = [];
         //a function to manage nested subscriptions
@@ -109,7 +106,7 @@ const main$ = restart$.pipe(
           //determines average block time
           subscribe(
             blocks$.pipe(
-              filter((_, i) => i % 30 === 0),
+              filter((__, i) => i % 30 === 0),
               timeInterval(),
               skip(1),
               tap((interval) => (averageBlockTime = interval.interval / 1e3 / 30)),
@@ -187,10 +184,11 @@ const main$ = restart$.pipe(
             )
           );
 
-          type HasuraPersistanceAction = {
+          type BatchableUpsertAction = {
             dedupe: string;
-            type: "hasura";
-            mutation: string;
+            type: "batchable";
+            schema: string;
+            table: string;
             object: any;
             constraint?: string;
           };
@@ -201,7 +199,7 @@ const main$ = restart$.pipe(
             callback: () => Promise<void>;
           };
 
-          const persistor = new Subject<HasuraPersistanceAction | CallbackPersistanceAction>();
+          const persistor = new Subject<BatchableUpsertAction | CallbackPersistanceAction>();
 
           subscribe(
             persistor.pipe(
@@ -226,31 +224,25 @@ const main$ = restart$.pipe(
               }),
               mergeMap((actions) =>
                 // ensures blocks are persisted before other actions
-                from([
-                  // a necessary evil to ensure blocks are persisted before other actions
-                  actions.filter(
-                    (action) => action.type === "hasura" && action.mutation === "insert_blocks"
-                  ),
-                  ...chunk(
+                from(
+                  _.chunk(
                     // useful when reindexing
-                    actions.filter(
-                      (action) => action.type !== "hasura" || action.mutation !== "insert_blocks"
-                    ),
+                    actions,
                     1000
-                  ),
-                ])
+                  )
+                )
               ),
               filter((actions) => actions.length > 0),
               concatMap((persistanceActions) => {
                 console.log("Persisting", persistanceActions.length, "entities");
 
-                const mutationsByType = groupBy(persistanceActions, "type");
+                const mutationsByType = _.groupBy(persistanceActions, "type");
 
                 return from(Object.keys(mutationsByType)).pipe(
                   concatMap((type) => {
                     const actions = mutationsByType[type];
-                    if (type === "hasura") {
-                      return persistHasura(actions as HasuraPersistanceAction[]);
+                    if (type === "batchable") {
+                      return persistBatches(actions as BatchableUpsertAction[]);
                     } else if (type === "callback") {
                       return from(actions as CallbackPersistanceAction[]).pipe(
                         concatMap((action) => action.callback())
@@ -261,40 +253,29 @@ const main$ = restart$.pipe(
                   })
                 );
 
-                function persistHasura(
-                  persistanceActions: HasuraPersistanceAction[]
-                ): ObservableInput<any> {
-                  const persistanceActionsByTable = groupBy(persistanceActions, "mutation");
-                  const params: string[] = [];
-                  const variables: any = {};
-                  const mutations: string[] = [];
-
-                  for (const mutation in persistanceActionsByTable) {
-                    const actions = persistanceActionsByTable[mutation];
-                    const mutationName = mutation.replace("insert_", "");
-                    const mutationArgs = actions.map((action) => action.object);
-                    const mutationConstraint = actions[0].constraint;
-                    variables[`objects_${mutationName}`] = mutationArgs;
-                    params.push(`$objects_${mutationName}: [${mutationName}_insert_input!]!`);
-                    const mutationQuery = `
-                      ${mutation}(
-                        objects: $objects_${mutationName}
-                        ${mutationConstraint ? `, on_conflict: ${mutationConstraint}` : ""}
-                      ) {
-                        affected_rows
-                      }
-                    `;
-                    mutations.push(mutationQuery);
-                  }
-
-                  return client.request(
-                    `
-                      mutation (${params.join(", ")}) {
-                        ${mutations.join("\n")}
-                      }
-                    `,
-                    variables
+                async function persistBatches(
+                  persistanceActions: BatchableUpsertAction[]
+                ): Promise<any> {
+                  const entityGroupedActions = _.groupBy(
+                    persistanceActions,
+                    (action) =>
+                      // public schema lexically first
+                      (action.schema === "public" ? "!" : "#") + action.schema + "." + action.table
                   );
+
+                  //public schema first as other entities will depend on it
+                  const entityActions = _.sortBy(Object.entries(entityGroupedActions), "0");
+
+                  console.log("Persisting", ..._.map(entityActions, ([key]) => key.substring(1)));
+
+                  for (const [, actions] of entityActions) {
+                    const { schema, table } = actions[0];
+                    await dataService.upsertRecords(
+                      schema,
+                      table,
+                      actions.map(_.property("object"))
+                    );
+                  }
                 }
               })
             )
@@ -304,7 +285,7 @@ const main$ = restart$.pipe(
           const metadata = loadSchemaMetadata();
 
           const contractFilters = [...metadata].map((contractMetadata) => {
-            const { tableMetadata, contractName, schema } = contractMetadata;
+            const { contractName, schema } = contractMetadata;
 
             const contract = new Contract(
               addresses[schema][contractName]["arbitrum"],
@@ -357,7 +338,7 @@ const main$ = restart$.pipe(
               from(
                 new Array(Math.ceil(rangeSize / batchSize))
                   .fill(0)
-                  .map((_, i) => [i * batchSize, Math.min((i + 1) * batchSize)])
+                  .map((__, i) => [i * batchSize, Math.min((i + 1) * batchSize)])
                   .map(([start, end]) => [
                     start + lastPersistedBlockNumber,
                     Math.min(startHeadBlock, end + lastPersistedBlockNumber),
@@ -367,8 +348,8 @@ const main$ = restart$.pipe(
           );
 
           // orgainse contract filters by schema and contract name
-          const contractFiltersBySchemaAndContract = mapValues(
-            groupBy(contractFilters, (filter) => filter.metadataKey),
+          const contractFiltersBySchemaAndContract = _.mapValues(
+            _.groupBy(contractFilters, (filter) => filter.metadataKey),
             0
           );
 
@@ -440,16 +421,33 @@ const main$ = restart$.pipe(
                   )
                 ).then((logs) => {
                   console.log(
-                    `Retrieved ${sumBy(logs, (l) => l[1].length)} logs for blocks ${from} -> ${to}`
+                    `Retrieved ${_.sumBy(
+                      logs,
+                      (l) => l[1].length
+                    )} logs for blocks ${from} -> ${to}`
                   );
                   return logs.flatMap(([metadataKey, logs]) =>
                     logs.map((log) => ({ metadataKey, log }))
                   );
                 })
+              ).pipe(
+                concatWith(
+                  defer(() => {
+                    persistor.next({
+                      dedupe: "autoconfirm",
+                      type: "callback",
+                      callback: async () => {
+                        console.log("Autoconfirming blocks before", autoconfimedBlock);
+                        await dataService.confirmBlocksBefore(autoconfimedBlock);
+                      },
+                    });
+                    return EMPTY;
+                  })
+                )
               );
             }),
             concatAll(),
-            map((logs) => sortBy(logs, (log) => sortIndexOf(log))),
+            map((logs) => _.sortBy(logs, (log) => sortIndexOf(log))),
             concatMap((logs) => from(logs))
           );
 
@@ -527,22 +525,25 @@ const main$ = restart$.pipe(
 
                   persistor.next({
                     dedupe: `${log.blockNumber}`,
-                    type: "hasura",
-                    mutation: "insert_blocks",
+                    type: "batchable",
+                    schema: "public",
+                    table: "blocks",
                     object: { id: log.blockHash, number: log.blockNumber, confirmed: false },
-                    constraint: `{ constraint: blocks_pkey }`,
                   });
 
                   blockConfirmer.next([log.blockNumber, log.blockHash]);
 
                   const bigNumberToString = (value: any) => {
-                    return BigNumber.isBigNumber(value) ? value.toBigInt().toString() : value;
+                    return BigNumber.isBigNumber(value) ? value.toBigInt() : value;
+                    // return BigNumber.isBigNumber(value) ? value.toBigInt().toString() : value;
+                    // return value;
                   };
 
                   persistor.next({
                     dedupe: log.blockHash + log.logIndex,
-                    type: "hasura",
-                    mutation: `insert_${schema}_${mapper.tableName}`,
+                    type: "batchable",
+                    schema,
+                    table: mapper.tableName,
                     object: Object.fromEntries([
                       ["id", (BigInt(log.blockNumber) * BigInt(1e3)).toString() + log.logIndex],
                       ...mapper.fields.map(
@@ -557,12 +558,8 @@ const main$ = restart$.pipe(
                       ["blockHash", log.blockHash],
                       ["transactionHash", log.transactionHash],
                       ["logIndex", log.logIndex],
-                      [
-                        "sortIndex",
-                        (BigInt(log.blockNumber) * BigInt(1e5) + BigInt(log.logIndex)).toString(),
-                      ],
+                      ["sortIndex", BigInt(log.blockNumber) * BigInt(1e5) + BigInt(log.logIndex)],
                     ]),
-                    constraint: `{ constraint: ${mapper.tableName}_pkey }`,
                   });
                 })
               )

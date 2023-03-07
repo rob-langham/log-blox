@@ -1,9 +1,7 @@
 import { readFileSync } from "fs";
-import { createMapperMetaDataFromAbi } from "../tools/schema-generator";
-import { groupBy, filter, property, isEqual, uniqBy, map } from "lodash";
-import { Axios } from "axios";
-import { Event } from "ethers";
+import { filter, groupBy, map, uniqBy } from "lodash";
 import { SchemaService } from "../services/SchemaService";
+import { createMapperMetaDataFromAbi } from "../tools/schema-generator";
 
 export interface Config {
   endpoint: string;
