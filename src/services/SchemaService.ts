@@ -1,3 +1,4 @@
+import { readFileSync } from "fs";
 import { type } from "os";
 import { Client } from "pg";
 
@@ -9,6 +10,10 @@ export class SchemaService {
     this.client.connect();
   }
 
+  async setupHelpers() {
+    await this.client.query(readFileSync("./src/schema_migration_helpers.sql").toString());
+  }
+
   async createSchema(schema: string) {
     await this.client.query(`create schema if not exists "${schema}";`);
   }
@@ -16,6 +21,7 @@ export class SchemaService {
   async createTable(
     schema: string,
     table: string,
+    network: string,
     columns: {
       columnName: string;
       columnType: string;
@@ -26,7 +32,11 @@ export class SchemaService {
       .join(", ");
 
     await this.client.query(
-      `call create_table_if_not_exists('${schema}'::text, '${table}'::text, ARRAY[${columnDefinitions}]::column_tuple[]);`
+      `call create_table_if_not_exists('${schema}', '${table}', ARRAY[${columnDefinitions}]::column_tuple[]);`
+    );
+
+    await this.client.query(
+      `call create_table_network_partition('${schema}', '${table}', '${network}')`
     );
 
     if (table !== "blocks")
@@ -34,9 +44,9 @@ export class SchemaService {
         await this.client.query(`
         alter table "${schema}"."${table}"
         add constraint "${table}_blockHash_fkey"
-        foreign key ("blockHash")
+        foreign key ("blockHash", "network")
         references "public"."blocks"
-        ("id") on update no action on delete cascade;
+        ("id", "network") on update no action on delete cascade;
       `);
       } catch (e) {
         // ignore error if the constraint already exists

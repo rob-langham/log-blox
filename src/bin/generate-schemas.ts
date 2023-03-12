@@ -1,5 +1,5 @@
 import { readFileSync } from "fs";
-import { filter, groupBy, map, uniqBy } from "lodash";
+import _ from "lodash";
 import { SchemaService } from "../services/SchemaService";
 import { createMapperMetaDataFromAbi } from "../tools/schema-generator";
 
@@ -49,7 +49,13 @@ type EventInput =
     }
   | TupleEventInput;
 
-const { abis } = config;
+const { abis, addresses } = config;
+
+function assert(condition: boolean, message: string) {
+  if (!condition) {
+    throw new Error(message);
+  }
+}
 
 export function* loadSchemaMetadata() {
   for (const schema in config.contracts) {
@@ -57,6 +63,8 @@ export function* loadSchemaMetadata() {
       const contract = config.contracts[schema][contractName];
 
       const { abis: contractAbis } = contract;
+
+      const networks = Object.keys(addresses?.[schema]?.[contractName] || {});
 
       const mergedAbis = contractAbis.flatMap((contractAbi) => {
         const file = abis + "/" + contractAbi + ".json";
@@ -67,10 +75,10 @@ export function* loadSchemaMetadata() {
         return "(" + abi.inputs.map((i: any) => i.type).join(",") + ")";
       }
 
-      const conflicts = filter(
-        groupBy(
-          uniqBy(
-            filter(mergedAbis, (i) => i.type === "event").map((i) => ({
+      const conflicts = _.filter(
+        _.groupBy(
+          _.uniqBy(
+            _.filter(mergedAbis, (i) => i.type === "event").map((i) => ({
               name: i.name,
               signature: i.name + signature(i),
             })),
@@ -79,7 +87,7 @@ export function* loadSchemaMetadata() {
           "name"
         ),
         (v) => v.length > 1
-      ).map((v) => map(v, "signature").join(", "));
+      ).map((v) => _.map(v, "signature").join(", "));
 
       if (conflicts.length) {
         console.error("Conflicting events found in ABI files: \n\t" + conflicts.join("\t"));
@@ -93,9 +101,11 @@ export function* loadSchemaMetadata() {
         // todo :: add a resolution strategy, with union, intersection manual signature
         process.exit(1);
       }
+
       yield {
         schema,
         contractName,
+        networks,
         abis: mergedAbis,
         config: contract,
         tableMetadata: createMapperMetaDataFromAbi(mergedAbis),
@@ -105,7 +115,9 @@ export function* loadSchemaMetadata() {
 }
 
 export async function migrate() {
-  for (let { schema, tableMetadata } of loadSchemaMetadata()) {
+  await schemaService.setupHelpers();
+
+  for (let { schema, tableMetadata, networks } of loadSchemaMetadata()) {
     let blockTableCreated = false;
 
     for (const tableData of tableMetadata) {
@@ -113,32 +125,34 @@ export async function migrate() {
     }
 
     async function runMigration(tableInfo: (typeof tableMetadata)[number]) {
-      const defaultColumns: Parameters<typeof schemaService.createTable>[2] = [
+      const defaultColumns: Parameters<typeof schemaService.createTable>[3] = [
         ["blockHash", "text"],
         ["transactionHash", "text"],
         ["logIndex", "numeric"],
         ["sortIndex", "numeric"],
       ].map(([columnName, columnType]) => ({ columnName, columnType }));
 
-      if (!blockTableCreated) {
-        schemaService.createTable("public", "blocks", [
-          {
-            columnName: "number",
-            columnType: "numeric",
-          },
-          {
-            columnName: "confirmed",
-            columnType: "bool",
-          },
+      for (const network of networks) {
+        if (!blockTableCreated) {
+          schemaService.createTable("public", "blocks", network, [
+            {
+              columnName: "number",
+              columnType: "numeric",
+            },
+            {
+              columnName: "confirmed",
+              columnType: "bool",
+            },
+          ]);
+
+          await schemaService.createSchema(schema);
+        }
+
+        schemaService.createTable(schema, tableInfo.tableName, network, [
+          ...tableInfo.fields,
+          ...defaultColumns,
         ]);
-
-        await schemaService.createSchema(schema);
       }
-
-      schemaService.createTable(schema, tableInfo.tableName, [
-        ...tableInfo.fields,
-        ...defaultColumns,
-      ]);
     }
   }
 }

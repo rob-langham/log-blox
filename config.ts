@@ -2,31 +2,36 @@ export default {
   // graphql endpoint
   endpoint: "http://localhost:8080",
   rpcs: {
-    arbitrum: "ws://192.168.0.124:8547",
+    // arbitrum: "ws://192.168.0.124:8548",
+    // mainnet: "ws://192.168.0.124:8546",
+    // arbitrum: "https://arb1.arbitrum.io/rpc",
+    // arbitrum: "wss://arb-mainnet.g.alchemy.com/v2/K1q6tDqmPOmJ350UevXDBlG2u7Xi7MSN",
+    // mainnet: "https://endpoints.omniatech.io/v1/arbitrum/one/public",
   },
   abis: "./abis",
   addresses: {
+    //todo move to contracts
     //schema
     contango: {
       //contract
       ContangoYield: {
         //network
         arbitrum: "0x30E7348163016B3b6E1621A3Cb40e8CF33CE97db",
-        // mainnet: "0x30E7348163016B3b6E1621A3Cb40e8CF33CE97db",
+        // mainnet: "0x6008DbC83cd0A752b44a7E1b1A1E8b7355a90e17",
       },
       YieldCauldron: {
         arbitrum: "0x44386ddB4C44E7CB8981f97AF89E928Ddd4258DD",
-        // mainnet: "0x44386ddB4C44E7CB8981f97AF89E928Ddd4258DD",
+        // mainnet: "0xf2F7c33234160387e5Dc82B1412b522AB44876C7",
       },
     },
     yield: {
       YieldCauldron: {
         arbitrum: "0x23cc87FBEBDD67ccE167Fa9Ec6Ad3b7fE3892E30",
-        // mainnet: "0x44386ddB4C44E7CB8981f97AF89E928Ddd4258DD",
+        // mainnet: "0xc88191F8cb8e6D4a668B047c1C8503432c3Ca867",
       },
       YieldWitch: {
-        arbitrum: "0x23cc87FBEBDD67ccE167Fa9Ec6Ad3b7fE3892E30",
-        // mainnet: "0x44386ddB4C44E7CB8981f97AF89E928Ddd4258DD",
+        arbitrum: "0x07c2c74811cb14a5003c3ccff7ec436d504fffb6",
+        // mainnet: "0x08d2F5c96bB1F6BE04B49bcD869d5Af01db4c400",
       },
     },
   },
@@ -41,6 +46,14 @@ export default {
         excludeEvents: [],
         customHandlers: [],
       },
+      // YieldPools: {
+      //   addressSource: {
+      //     type: "event",
+      //     contract: "YieldCauldron",
+      //     signaute: "PoolAdded(address,address,uint256)",
+      //     paramWithAddress: "1",
+      //   },
+      // },
     },
     yield: {
       YieldCauldron: {
