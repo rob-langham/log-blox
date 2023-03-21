@@ -4,7 +4,7 @@ export default {
   rpcs: {
     // arbitrum: "ws://192.168.0.124:8548",
     // mainnet: "ws://192.168.0.124:8546",
-    // arbitrum: "https://arb1.arbitrum.io/rpc",
+    arbitrum: "https://arb1.arbitrum.io/rpc",
     // arbitrum: "wss://arb-mainnet.g.alchemy.com/v2/K1q6tDqmPOmJ350UevXDBlG2u7Xi7MSN",
     // mainnet: "https://endpoints.omniatech.io/v1/arbitrum/one/public",
   },
