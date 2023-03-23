@@ -64,16 +64,17 @@ function ethereumTupleTypeToColumnNames(
   return columns.flat();
 }
 
-export function createMapperMetaDataFromAbi(abiJson: any): {
+export type EventOrmMapperMetadata = {
   eventName: string;
   tableName: string;
-  hasuraClientOperations: Record<"insert" | "upsert" | "delete" | "select", string>;
   fields: {
     columnName: string;
     columnType: string;
     eventArgsPath: number[];
   }[];
-}[] {
+};
+
+export function createMapperMetaDataFromAbi(abiJson: any): EventOrmMapperMetadata[] {
   // Find all the events in the ABI
   const events = abiJson.filter((x: any) => x.type === "event");
 
@@ -104,12 +105,6 @@ export function createMapperMetaDataFromAbi(abiJson: any): {
 
       return {
         eventName: event.name,
-        hasuraClientOperations: {
-          insert: "insert" + event.name + "Event",
-          upsert: "upsert" + event.name + "Event",
-          delete: "delete" + event.name + "Event",
-          select: "get" + event.name + "Event",
-        },
         tableName: classToSnakeCase(`${event.name}Event`),
         fields,
       };

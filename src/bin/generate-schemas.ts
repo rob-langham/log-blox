@@ -1,7 +1,10 @@
 import { readFileSync } from "fs";
 import _ from "lodash";
+import { Logger } from "../logger";
 import { SchemaService } from "../services/SchemaService";
-import { createMapperMetaDataFromAbi } from "../tools/schema-generator";
+import { createMapperMetaDataFromAbi, EventOrmMapperMetadata } from "../tools/schema-generator";
+
+const logger = new Logger();
 
 export interface Config {
   endpoint: string;
@@ -23,7 +26,7 @@ export interface Config {
     };
   };
   customHandlers: {
-    triggers: string[];
+    sources: [string, string][];
     handler: string;
     entity: string;
     immutable: boolean;
@@ -57,7 +60,58 @@ function assert(condition: boolean, message: string) {
   }
 }
 
-export function* loadSchemaMetadata() {
+export type OrmMapperMetadata = {
+  tableName: string;
+  fields: {
+    columnName: string;
+    columnType: string;
+  }[];
+};
+
+export type CustomSchemaMetadata = {
+  schema: string;
+  contractName: string;
+  networks: string[];
+  abis: any[];
+  config: any;
+  tableMetadata: OrmMapperMetadata;
+};
+
+export type SchemaMetadata = {
+  schema: string;
+  contractName: string;
+  networks: string[];
+  abis: any[];
+  config: any;
+  tableMetadata: EventOrmMapperMetadata[];
+};
+
+export function* loadCustomHandlerSchemaMetadata(): Generator<CustomSchemaMetadata> {
+  const schemMetadata = [...loadSchemaMetadata()];
+  for (const customHandler of config.customHandlers) {
+    const { sources, handler, entity, immutable } = customHandler;
+    assert(!!sources, "Contract name is required for custom handlers");
+    assert(!!handler, "Handler name is required for custom handlers");
+    assert(!!entity, "Entity name is required for custom handlers");
+
+    //determine if all sources are available for this schema
+    const sourcesNotFound = !!sources.find(
+      ([contractName, eventName]) =>
+        !schemMetadata.find(
+          (x) =>
+            x.contractName === contractName &&
+            x.tableMetadata.find((y) => y.eventName === eventName)
+        )
+    );
+
+    if (sourcesNotFound) {
+      logger.info(`Skipping custom handler ${handler} because some sources were not found`);
+      continue;
+    }
+  }
+}
+
+export function* loadSchemaMetadata(): Generator<SchemaMetadata> {
   for (const schema in config.contracts) {
     for (const contractName in config.contracts[schema]) {
       const contract = config.contracts[schema][contractName];
@@ -112,6 +166,38 @@ export function* loadSchemaMetadata() {
       };
     }
   }
+
+  // for (const handlerConfig of config.customHandlers || []) {
+  //   const { triggers, entity, handler, immutable } = handlerConfig;
+
+  //   for (const trigger of triggers) {
+  //     const [schema, contractName, event] = trigger.split(".");
+
+  //     const networks = Object.keys(addresses?.[schema]?.[contractName] || {});
+
+  //     const tableMetadata = [
+  //       {
+  //         tableName: entity,
+  //         fields: [
+  //           {
+  //             columnName: "id",
+  //             columnType: "text",
+  //             isPrimary: true,
+  //           },
+  //         ],
+  //       },
+  //     ];
+
+  //     yield {
+  //       schema,
+  //       contractName,
+  //       networks,
+  //       abis: [],
+  //       config: { immutable },
+  //       tableMetadata,
+  //     };
+  //   }
+  // }
 }
 
 export async function migrate() {

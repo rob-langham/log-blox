@@ -64,33 +64,36 @@ export default {
   },
   customHandlers: [
     {
-      triggers: [
+      sources: [
         // A handler instance is created for each schema where the sources are available
         //  if the same contract names are available in multiple schemas
         //  the handler will be run for each schema
-        "ContangoYield:PositionUpserted",
-        "ContangoYield:PositionLiquidated",
-        "ContangoYield:PositionClosed",
+        ["ContangoYield", "PositionUpserted"],
+        ["ContangoYield", "PositionLiquidated"],
+        ["ContangoYield", "PositionClosed"],
       ],
       // This should take the event and return the data to be upserted
       // undefined fields will be ignored
 
       //create the file if it doesn't exist
       handler: "./src/custom/handlers/position.ts",
-      entity: `Position(
-        positionId indexed uint256,
-        trader indexed address,
-        symbol bytes32,
-        openQuantity uint256,
-        openCost uint256,
-        collateral int256,
-        protocolFees uint256,
-        maturity uint32,
-        feeModel address
-      )`,
+      entity: {
+        name: "Position",
+        columns: [
+          ["positionId", "uint256", { indexed: true }],
+          ["trader", "address", { indexed: true }],
+          ["symbol", "bytes32"],
+          ["openQuantity", "uint256"],
+          ["openCost", "uint256"],
+          ["collateral", "int256"],
+          ["protocolFees", "uint256"],
+          ["maturity", "uint32"],
+          ["feeModel", "address"],
+        ],
+      },
       immutable: false,
 
-      //will only run on a network if all the sources available for that network
+      //will only run on a network if all the sources are available for that network
 
       //we need to validate that the event is valid for the abi
 

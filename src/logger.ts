@@ -27,7 +27,14 @@ export class Logger {
     function nameOfModuleThatCalledThisFunction() {
       const error = new Error();
       const stack = error.stack;
-      return stack?.split("at ")[3].split("/")?.pop()?.split(".")[0] ?? "unknown";
+      return (
+        // compatible with bun and nodejs. The formats are different
+        ("\n" + stack)
+          ?.split(/at |\n/)[3]
+          .split("/")
+          ?.pop()
+          ?.split(".")[0] ?? "unknown"
+      );
     }
   }
 

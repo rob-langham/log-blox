@@ -151,12 +151,6 @@ export function createMapperMetaDataFromAbi(abiJson) {
 
     return {
       eventName: event.name,
-      hasuraClientOperations: {
-        insert: "insert" + event.name + "Event",
-        upsert: "upsert" + event.name + "Event",
-        delete: "delete" + event.name + "Event",
-        select: "get" + event.name + "Event",
-      },
       fields,
     };
   });
