@@ -5,10 +5,13 @@ import _ from "lodash";
 import {
   defer,
   EMPTY,
+  firstValueFrom,
   from,
   merge,
   mergeMap,
+  NEVER,
   Observable,
+  ObservableInput,
   of,
   ReplaySubject,
   Subject,
@@ -16,8 +19,7 @@ import {
 } from "rxjs";
 
 import {
-  auditTime,
-  bufferTime,
+  catchError,
   concatAll,
   concatMap,
   concatWith,
@@ -27,18 +29,21 @@ import {
   retry,
   scan,
   share,
-  skip,
+  shareReplay,
   startWith,
   switchMap,
+  take,
   takeWhile,
   tap,
-  timeInterval,
+  timeout,
 } from "rxjs/operators";
 
 //TODO move to a config util
 import { config, loadSchemaMetadata, migrate } from "./bin/generate-schemas";
+import { createPersistor } from "./services/persistor.service";
 import { Logger } from "./logger";
-import { DataService } from "./services/DataService";
+import { DataService } from "./services/data.service";
+import { reorgNotifier } from "./reorgNotifier";
 
 const logger = new Logger();
 
@@ -80,7 +85,7 @@ const root$ = from(_.keys(config.rpcs)).pipe(
           new Observable(() => {
             const subscriptions: (() => void)[] = [];
             //a function to manage nested subscriptions
-            function subscribe(src$: Observable<any>) {
+            function subscribe(src$: Pick<Observable<any>, "subscribe">) {
               const sub = src$.subscribe();
               subscriptions.push(() => sub.unsubscribe());
             }
@@ -93,6 +98,8 @@ const root$ = from(_.keys(config.rpcs)).pipe(
             async function main() {
               console.log("starting iteration", iteration);
 
+              const historyComplete$ = new ReplaySubject(1);
+
               // older blocks may not have been confirmed so it's quicker to delete them and start fresh from that point
               //TODO this should be done in a tx that commits when the new blocks are saved
               await dataService.deleteUnconfirmedBlocks();
@@ -104,215 +111,32 @@ const root$ = from(_.keys(config.rpcs)).pipe(
               savedBlocks.add("");
 
               const blocks$ = new Observable<number>((subscriber) => {
-                console.log("blocks$ subscription started");
+                logger.info("blocks$ subscription started");
                 const onBlock = (blockNumber: number) => {
                   // console.log("block", blockNumber);
                   subscriber.next(blockNumber);
                 };
                 provider.on("block", onBlock);
                 return () => provider.off("block", onBlock);
-              }).pipe(share());
-
-              const blockConfirmer = new Subject<[number, string]>();
-              const confirmations = 70;
-              let averageBlockTime = 12; // mainnet default
-
-              //determines average block time
-              subscribe(
-                blocks$.pipe(
-                  filter((__, i) => i % 30 === 0),
-                  timeInterval(),
-                  skip(1),
-                  tap((interval) => (averageBlockTime = interval.interval / 1e3 / 30)),
-                  tap(() =>
-                    console.log("averageBlockTime", parseFloat(averageBlockTime.toFixed(4)))
-                  )
-                )
-              );
-
-              type ReorgNotification = {
-                blockNumber: number;
-                oldBlockHash: string;
-                newBlockHash: string;
-              };
-
-              const historyComplete$ = new ReplaySubject(1);
-              const startHeadBlock = await provider.getBlockNumber();
-              const autoconfimedBlock = startHeadBlock - confirmations;
-
-              console.log(
-                "current chain head:",
-                startHeadBlock,
-                "autoconfirmed:",
-                autoconfimedBlock
-              );
-
-              const possibleReorg$: Observable<ReorgNotification> = merge(
-                defer(async () => console.log("possibleReorg$ subscription started")).pipe(
-                  ignoreElements()
-                ),
-                blockConfirmer
-              ).pipe(
-                mergeMap(([blockNumber, blockHash]) => {
-                  if (blockNumber < autoconfimedBlock) {
-                    return EMPTY;
-                  } else {
-                    console.log(
-                      "checking validity of block",
-                      blockNumber,
-                      "against hash",
-                      blockHash
-                    );
-                    return new Observable<ReorgNotification>((subscriber) => {
-                      const sub = blocks$
-                        .pipe(
-                          // check every 5 blocks to see if the block has been reorged
-                          // when there is a backlog of blocks this might just run once
-                          auditTime(averageBlockTime * 1e3 * 5),
-                          startWith(provider.blockNumber),
-                          mergeMap(async (headBlock: number) => {
-                            const block = await provider.getBlock(blockNumber);
-
-                            if (block.hash === blockHash) {
-                              return headBlock;
-                            } else {
-                              subscriber.next({
-                                blockNumber,
-                                oldBlockHash: blockHash,
-                                newBlockHash: block.hash,
-                              });
-                              throw new Error("reorg");
-                            }
-                          }),
-                          takeWhile(
-                            (checkedBlockNumber) =>
-                              checkedBlockNumber <= blockNumber + confirmations
-                          ),
-                          concatWith(defer(() => dataService.confirmBlock(blockHash, blockNumber)))
-                        )
-                        .subscribe({
-                          complete: () => {
-                            // not called when error is thrown
-                            subscriber.complete();
-                          },
-                        });
-
-                      return () => sub.unsubscribe();
-                    });
-                  }
-                }, 5)
-              );
-
-              subscribe(
-                possibleReorg$.pipe(
-                  tap((reorg) => {
-                    console.log("reorg", reorg);
-                  })
-                )
-              );
-
-              type BatchableUpsertAction = {
-                dedupe: string;
-                type: "batchable";
-                schema: string;
-                table: string;
-                object: any;
-                constraint?: string;
-              };
-
-              type CallbackPersistanceAction = {
-                dedupe: string;
-                type: "callback";
-                callback: () => Promise<void>;
-              };
-
-              const persistor = new Subject<BatchableUpsertAction | CallbackPersistanceAction>();
-
-              subscribe(
-                persistor.pipe(
-                  bufferTime(1000),
-                  map((actions) => {
-                    const array = actions.reduce(
-                      (acc, action) => {
-                        if (!acc.dedupe.has(action.dedupe)) {
-                          acc.dedupe.add(action.dedupe);
-                          acc.array.push(action);
-                        }
-                        return acc;
-                      },
-                      { array: [] as typeof actions, dedupe: new Set() }
-                    ).array;
-
-                    if (array.length != actions.length) {
-                      console.log("Deduped", actions.length - array.length, "actions");
-                    }
-
-                    return array;
-                  }),
-                  mergeMap((actions) =>
-                    // ensures blocks are persisted before other actions
-                    from(
-                      _.chunk(
-                        // useful when reindexing
-                        actions,
-                        1000
-                      )
-                    )
+              }).pipe(
+                (src: Observable<number>): Observable<number> =>
+                  src.pipe(
+                    timeout(30e3),
+                    catchError(() => {
+                      logger.error("blocks$ timed out, restarting");
+                      return NEVER;
+                    })
                   ),
-                  filter((actions) => actions.length > 0),
-                  concatMap((persistanceActions) => {
-                    console.log("Persisting", persistanceActions.length, "entities");
-
-                    const mutationsByType = _.groupBy(persistanceActions, "type");
-
-                    return from(Object.keys(mutationsByType)).pipe(
-                      concatMap((type) => {
-                        const actions = mutationsByType[type];
-                        if (type === "batchable") {
-                          return persistBatches(actions as BatchableUpsertAction[]);
-                        } else if (type === "callback") {
-                          return from(actions as CallbackPersistanceAction[]).pipe(
-                            concatMap((action) => action.callback())
-                          );
-                        }
-
-                        return EMPTY;
-                      })
-                    );
-
-                    async function persistBatches(
-                      persistanceActions: BatchableUpsertAction[]
-                    ): Promise<any> {
-                      const entityGroupedActions = _.groupBy(
-                        persistanceActions,
-                        (action) =>
-                          // public schema lexically first
-                          (action.schema === "public" ? "!" : "#") +
-                          action.schema +
-                          "." +
-                          action.table
-                      );
-
-                      //public schema first as other entities will depend on it
-                      const entityActions = _.sortBy(Object.entries(entityGroupedActions), "0");
-
-                      console.log(
-                        "Persisting",
-                        ..._.map(entityActions, ([key]) => key.substring(1))
-                      );
-
-                      for (const [, actions] of entityActions) {
-                        const { schema, table } = actions[0];
-                        await dataService.upsertRecords(
-                          schema,
-                          table,
-                          actions.map(_.property("object"))
-                        );
-                      }
-                    }
-                  })
-                )
+                shareReplay(1, 50)
               );
+
+              const { confirmBlock, reorgs$ } = reorgNotifier(blocks$, dataService, provider);
+
+              subscribe(reorgs$);
+
+              const persistor = createPersistor(dataService);
+
+              subscribe(persistor);
 
               const { addresses } = config;
               const metadata = loadSchemaMetadata();
@@ -369,7 +193,7 @@ const root$ = from(_.keys(config.rpcs)).pipe(
                 });
 
               const batchSize = 1e6;
-              const rangeSize = startHeadBlock - lastPersistedBlockNumber;
+              const rangeSize = (await firstValueFrom(blocks$)) - lastPersistedBlockNumber;
               const batches$ = of(1).pipe(
                 mergeMap(() => provider.getBlockNumber()),
                 switchMap((startHeadBlock) =>
@@ -472,16 +296,6 @@ const root$ = from(_.keys(config.rpcs)).pipe(
                   );
                 }),
                 map((logs) => _.sortBy(logs, (log) => sortIndexOf(log))),
-                tap(() => {
-                  persistor.next({
-                    dedupe: "autoconfirm",
-                    type: "callback",
-                    callback: async () => {
-                      console.log("Autoconfirming blocks before", autoconfimedBlock);
-                      await dataService.confirmBlocksBefore(autoconfimedBlock);
-                    },
-                  });
-                }),
                 concatMap((logs) => from(logs))
               );
 
@@ -508,14 +322,6 @@ const root$ = from(_.keys(config.rpcs)).pipe(
                           of(1).pipe(
                             tap(() => {
                               // blocks are persisted first
-                              persistor.next({
-                                dedupe: "autoconfirm",
-                                type: "callback",
-                                callback: async () => {
-                                  console.log("Autoconfirming blocks before", autoconfimedBlock);
-                                  await dataService.confirmBlocksBefore(autoconfimedBlock);
-                                },
-                              });
                               historyComplete$.complete();
                             }),
                             ignoreElements()
@@ -557,7 +363,7 @@ const root$ = from(_.keys(config.rpcs)).pipe(
 
                       const mapper = metadataByEvent[eventName.name];
 
-                      persistor.next({
+                      persistor.persist({
                         dedupe: `${log.blockNumber}`,
                         type: "batchable",
                         schema: "public",
@@ -565,7 +371,7 @@ const root$ = from(_.keys(config.rpcs)).pipe(
                         object: { id: log.blockHash, number: log.blockNumber, confirmed: false },
                       });
 
-                      blockConfirmer.next([log.blockNumber, log.blockHash]);
+                      confirmBlock([log.blockNumber, log.blockHash]);
 
                       const bigNumberToString = (value: any) => {
                         return BigNumber.isBigNumber(value) ? value.toBigInt() : value;
@@ -573,7 +379,7 @@ const root$ = from(_.keys(config.rpcs)).pipe(
                         // return value;
                       };
 
-                      persistor.next({
+                      persistor.persist({
                         dedupe: log.blockHash + log.logIndex,
                         type: "batchable",
                         schema,
