@@ -9,7 +9,6 @@ import {
   from,
   merge,
   mergeMap,
-  NEVER,
   Observable,
   ObservableInput,
   of,
@@ -19,7 +18,6 @@ import {
 } from "rxjs";
 
 import {
-  catchError,
   concatAll,
   concatMap,
   concatWith,
@@ -29,13 +27,11 @@ import {
   retry,
   scan,
   share,
-  shareReplay,
   startWith,
   switchMap,
   take,
   takeWhile,
   tap,
-  timeout,
 } from "rxjs/operators";
 
 //TODO move to a config util
@@ -43,9 +39,10 @@ import { config, loadSchemaMetadata, migrate } from "./bin/generate-schemas";
 import { createPersistor } from "./services/persistor.service";
 import { Logger } from "./logger";
 import { DataService } from "./services/data.service";
-import { reorgNotifier } from "./reorgNotifier";
+import { reorgNotifier } from "./services/reorg-notifier.service";
+import { blocks$ } from "./services/blocks";
 
-const logger = new Logger();
+export const logger = new Logger();
 
 type KeyedEvent = {
   metadataKey: string;
@@ -104,33 +101,15 @@ const root$ = from(_.keys(config.rpcs)).pipe(
               //TODO this should be done in a tx that commits when the new blocks are saved
               await dataService.deleteUnconfirmedBlocks();
               console.log("deleted unconfirmed blocks");
+
               const lastPersistedBlockNumber = await dataService.getLatestBlock();
               console.log("lastPersistedBlockNumber", lastPersistedBlockNumber);
 
-              const savedBlocks = new Set<string>();
-              savedBlocks.add("");
-
-              const blocks$ = new Observable<number>((subscriber) => {
-                logger.info("blocks$ subscription started");
-                const onBlock = (blockNumber: number) => {
-                  // console.log("block", blockNumber);
-                  subscriber.next(blockNumber);
-                };
-                provider.on("block", onBlock);
-                return () => provider.off("block", onBlock);
-              }).pipe(
-                (src: Observable<number>): Observable<number> =>
-                  src.pipe(
-                    timeout(30e3),
-                    catchError(() => {
-                      logger.error("blocks$ timed out, restarting");
-                      return NEVER;
-                    })
-                  ),
-                shareReplay(1, 50)
+              const { confirmBlock, reorgs$ } = reorgNotifier(
+                blocks$(provider),
+                dataService,
+                provider
               );
-
-              const { confirmBlock, reorgs$ } = reorgNotifier(blocks$, dataService, provider);
 
               subscribe(reorgs$);
 
@@ -193,7 +172,8 @@ const root$ = from(_.keys(config.rpcs)).pipe(
                 });
 
               const batchSize = 1e6;
-              const rangeSize = (await firstValueFrom(blocks$)) - lastPersistedBlockNumber;
+              const rangeSize =
+                (await firstValueFrom(blocks$(provider))) - lastPersistedBlockNumber;
               const batches$ = of(1).pipe(
                 mergeMap(() => provider.getBlockNumber()),
                 switchMap((startHeadBlock) =>

@@ -9,18 +9,24 @@ import {
   tap,
   timeInterval,
 } from "rxjs/operators";
-import { DataService } from "./services/data.service";
+import { DataService } from "./data.service";
 
 type ReorgNotification = {
   blockNumber: number;
   oldBlockHash: string;
   newBlockHash: string;
 };
+
+type ReorgNotifier = {
+  reorgs$: Observable<ReorgNotification>;
+  confirmBlock: (value: [number, string]) => void;
+};
+
 export function reorgNotifier(
   blocks$: Observable<number>,
   dataService: DataService,
   provider: Provider
-): { reorgs$: Observable<ReorgNotification>; confirmBlock: (value: [number, string]) => void } {
+): ReorgNotifier {
   // const blockConfirmer = new Subject<[number, string]>();
   const blockConfirmer = new Subject<[number, string]>();
   let averageBlockTime = 12; // mainnet default
