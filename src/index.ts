@@ -171,7 +171,7 @@ const root$ = from(_.keys(config.rpcs)).pipe(
                   } as const;
                 });
 
-              const batchSize = 1e6;
+              const batchSize = 2e3;
               const rangeSize =
                 (await firstValueFrom(blocks$(provider))) - lastPersistedBlockNumber;
               const batches$ = of(1).pipe(

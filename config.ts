@@ -2,9 +2,9 @@ export default {
   // graphql endpoint
   endpoint: "http://localhost:8080",
   rpcs: {
-    // arbitrum: "ws://192.168.0.124:8548",
+    arbitrum: "ws://192.168.0.124:8548",
     // mainnet: "ws://192.168.0.124:8546",
-    arbitrum: "https://arb1.arbitrum.io/rpc",
+    // arbitrum: "https://arb1.arbitrum.io/rpc",
     // arbitrum: "wss://arb-mainnet.g.alchemy.com/v2/K1q6tDqmPOmJ350UevXDBlG2u7Xi7MSN",
     // mainnet: "https://endpoints.omniatech.io/v1/arbitrum/one/public",
   },
@@ -34,6 +34,11 @@ export default {
         // mainnet: "0x08d2F5c96bB1F6BE04B49bcD869d5Af01db4c400",
       },
     },
+    aave: {
+      AavePool: {
+        arbitrum: "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+      },
+    },
   },
   contracts: {
     contango: {
@@ -44,7 +49,6 @@ export default {
       YieldCauldron: {
         abis: ["YieldCauldron"],
         excludeEvents: [],
-        customHandlers: [],
       },
       // YieldPools: {
       //   addressSource: {
@@ -61,6 +65,12 @@ export default {
         excludeEvents: [],
       },
     },
+    // aave: {
+    //   AavePool: {
+    //     abis: ["AavePool"],
+    //     excludeEvents: [],
+    //   },
+    // },
   },
   customHandlers: [
     {
