@@ -41,13 +41,18 @@ export class SchemaService {
 
     if (table !== "blocks")
       try {
+        // create contraint for foreign key
+        await this.client.query(
+          `create index if not exists "${table}_blockHash_index" on "${schema}"."${table}" ("blockHash", "network");`
+        );
+
         await this.client.query(`
-        alter table "${schema}"."${table}"
-        add constraint "${table}_blockHash_fkey"
-        foreign key ("blockHash", "network")
-        references "public"."blocks"
-        ("id", "network") on update no action on delete cascade;
-      `);
+          alter table "${schema}"."${table}"
+          add constraint "${table}_blockHash_fkey"
+          foreign key ("blockHash", "network")
+          references "public"."blocks"
+          ("id", "network") on update no action on delete cascade;
+        `);
       } catch (e) {
         // ignore error if the constraint already exists
       }
