@@ -10,18 +10,14 @@ export interface Config {
   endpoint: string;
   rpcs: Record<string, string>;
   abis: string;
-  addresses: {
-    [schema: string]: {
-      [contractName: string]: {
-        [network: string]: string;
-      };
-    };
-  };
   contracts: {
     [schema: string]: {
       [contractName: string]: {
         abis: string[];
         excludeEvents: string[];
+        addresses: {
+          [network: string]: string;
+        };
       };
     };
   };
@@ -52,7 +48,7 @@ type EventInput =
     }
   | TupleEventInput;
 
-const { abis, addresses } = config;
+const { abis } = config;
 
 function assert(condition: boolean, message: string) {
   if (!condition) {
@@ -89,7 +85,7 @@ export type SchemaMetadata = {
 export function* loadCustomHandlerSchemaMetadata(): Generator<CustomSchemaMetadata> {
   const schemMetadata = [...loadSchemaMetadata()];
   for (const customHandler of config.customHandlers) {
-    const { sources, handler, entity, immutable } = customHandler;
+    const { sources, handler, entity } = customHandler;
     assert(!!sources, "Contract name is required for custom handlers");
     assert(!!handler, "Handler name is required for custom handlers");
     assert(!!entity, "Entity name is required for custom handlers");
@@ -116,9 +112,20 @@ export function* loadSchemaMetadata(): Generator<SchemaMetadata> {
     for (const contractName in config.contracts[schema]) {
       const contract = config.contracts[schema][contractName];
 
+      assert(
+        !!contract.addresses,
+        `addresses is a required field in contracts.${schema}.${contractName}`
+      );
+      assert(
+        Object.keys(contract.addresses).length > 0,
+        `addresses is empty in contracts.${schema}.${contractName}`
+      );
+      assert(!!contract.abis, `abis is a required field in contracts.${schema}.${contractName}`);
+      assert(contract.abis.length > 0, `abis is empty in contracts.${schema}.${contractName}`);
+
       const { abis: contractAbis } = contract;
 
-      const networks = Object.keys(addresses?.[schema]?.[contractName] || {});
+      const networks = Object.keys(contract.addresses || {});
 
       const mergedAbis = contractAbis.flatMap((contractAbi) => {
         const file = abis + "/" + contractAbi + ".json";
@@ -166,38 +173,6 @@ export function* loadSchemaMetadata(): Generator<SchemaMetadata> {
       };
     }
   }
-
-  // for (const handlerConfig of config.customHandlers || []) {
-  //   const { triggers, entity, handler, immutable } = handlerConfig;
-
-  //   for (const trigger of triggers) {
-  //     const [schema, contractName, event] = trigger.split(".");
-
-  //     const networks = Object.keys(addresses?.[schema]?.[contractName] || {});
-
-  //     const tableMetadata = [
-  //       {
-  //         tableName: entity,
-  //         fields: [
-  //           {
-  //             columnName: "id",
-  //             columnType: "text",
-  //             isPrimary: true,
-  //           },
-  //         ],
-  //       },
-  //     ];
-
-  //     yield {
-  //       schema,
-  //       contractName,
-  //       networks,
-  //       abis: [],
-  //       config: { immutable },
-  //       tableMetadata,
-  //     };
-  //   }
-  // }
 }
 
 export async function migrate() {

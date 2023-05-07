@@ -1,24 +1,20 @@
 import { StaticJsonRpcProvider, WebSocketProvider } from "@ethersproject/providers";
 import { BigNumber, Contract, Event, EventFilter } from "ethers";
-import { GraphQLClient } from "graphql-request";
 import _ from "lodash";
 import {
+  Observable,
+  ReplaySubject,
+  Subject,
   defer,
-  EMPTY,
   firstValueFrom,
   from,
   merge,
   mergeMap,
-  Observable,
-  ObservableInput,
   of,
-  ReplaySubject,
-  Subject,
   timer,
 } from "rxjs";
 
 import {
-  concatAll,
   concatMap,
   concatWith,
   filter,
@@ -26,21 +22,18 @@ import {
   map,
   retry,
   scan,
-  share,
   startWith,
   switchMap,
-  take,
-  takeWhile,
   tap,
 } from "rxjs/operators";
 
 //TODO move to a config util
 import { config, loadSchemaMetadata, migrate } from "./bin/generate-schemas";
-import { createPersistor } from "./services/persistor.service";
 import { Logger } from "./logger";
-import { DataService } from "./services/data.service";
-import { reorgNotifier } from "./services/reorg-notifier.service";
 import { blocks$ } from "./services/blocks";
+import { DataService } from "./services/data.service";
+import { createPersistor } from "./services/persistor.service";
+import { reorgNotifier } from "./services/reorg-notifier.service";
 
 export const logger = new Logger(module);
 
@@ -121,28 +114,22 @@ const root$ = from(_.keys(config.rpcs)).pipe(
 
               subscribe(persistor);
 
-              const { addresses } = config;
               const metadata = loadSchemaMetadata();
 
               const contractFilters = [...metadata]
                 .filter(
                   // filter out contracts that are not deployed on the current network
-                  ({ schema, contractName }) => addresses?.[schema]?.[contractName]?.[network]
+                  ({ config }) => config.addresses[network]
                 )
                 .map((contractMetadata) => {
-                  const { contractName, schema } = contractMetadata;
+                  const { contractName, schema, config } = contractMetadata;
+                  const { addresses } = config;
 
-                  const contract = new Contract(
-                    addresses[schema][contractName][network],
-                    contractMetadata.abis
-                  ).connect(provider);
-
-                  console.log(
-                    "Processing contract",
-                    schema,
-                    contractName,
-                    addresses[schema][contractName][network]
+                  const contract = new Contract(addresses[network], contractMetadata.abis).connect(
+                    provider
                   );
+
+                  console.log("Processing contract", schema, contractName, addresses[network]);
                   // map of topics to event signatures
                   const eventNames: Record<
                     string,
@@ -175,7 +162,7 @@ const root$ = from(_.keys(config.rpcs)).pipe(
                   } as const;
                 });
 
-              const batchSize = 1e6;
+              const batchSize = 2e3;
               const rangeSize =
                 (await firstValueFrom(blocks$(provider))) - lastPersistedBlockNumber;
               const batches$ = of(1).pipe(
@@ -349,14 +336,6 @@ const root$ = from(_.keys(config.rpcs)).pipe(
                       );
 
                       const mapper = metadataByEvent[eventName.name];
-
-                      // persistor.persist({
-                      //   dedupe: `${log.blockNumber}`,
-                      //   type: "batchable",
-                      //   schema: "public",
-                      //   table: "blocks",
-                      //   object: { id: log.blockHash, number: log.blockNumber, confirmed: false },
-                      // });
 
                       await dataService.insertBlock(log.blockHash, log.blockNumber);
 

@@ -9,47 +9,32 @@ export default {
     // mainnet: "https://endpoints.omniatech.io/v1/arbitrum/one/public",
   },
   abis: "./abis",
-  addresses: {
-    //todo move to contracts
-    //schema
-    contango: {
-      //contract
-      ContangoYield: {
-        //network
-        arbitrum: "0x30E7348163016B3b6E1621A3Cb40e8CF33CE97db",
-        // mainnet: "0x6008DbC83cd0A752b44a7E1b1A1E8b7355a90e17",
-      },
-      YieldCauldron: {
-        arbitrum: "0x44386ddB4C44E7CB8981f97AF89E928Ddd4258DD",
-        // mainnet: "0xf2F7c33234160387e5Dc82B1412b522AB44876C7",
-      },
-    },
-    yield: {
-      YieldCauldron: {
-        arbitrum: "0x23cc87FBEBDD67ccE167Fa9Ec6Ad3b7fE3892E30",
-        // mainnet: "0xc88191F8cb8e6D4a668B047c1C8503432c3Ca867",
-      },
-      YieldWitch: {
-        arbitrum: "0x07c2c74811cb14a5003c3ccff7ec436d504fffb6",
-        // mainnet: "0x08d2F5c96bB1F6BE04B49bcD869d5Af01db4c400",
-      },
-    },
-    aave: {
-      AavePool: {
-        arbitrum: "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
-      },
-    },
-  },
   contracts: {
     contango: {
       ContangoYield: {
         abis: ["ContangoYield", "YieldStorageLib"],
         excludeEvents: [],
+        addresses: {
+          arbitrum: "0x30E7348163016B3b6E1621A3Cb40e8CF33CE97db",
+          // mainnet: "0x6008DbC83cd0A752b44a7E1b1A1E8b7355a90e17",
+        },
       },
       YieldCauldron: {
         abis: ["YieldCauldron"],
         excludeEvents: [],
+        addresses: {
+          arbitrum: "0x44386ddB4C44E7CB8981f97AF89E928Ddd4258DD",
+          // mainnet: "0xf2F7c33234160387e5Dc82B1412b522AB44876C7",
+        },
       },
+      // YieldWitch: {
+      //   abis: ["YieldWitch"],
+      //   excludeEvents: [],
+      //   addresses: {
+      //     arbitrum: "0x89343a24a217172A569A0bD68763Bf0671A3efd8",
+      //     // mainnet: "0x08d2F5c96bB1F6BE04B49bcD869d5Af01db4c400",
+      //   },
+      // },
       // YieldPools: {
       //   addressSource: {
       //     type: "event",
@@ -63,12 +48,26 @@ export default {
       YieldCauldron: {
         abis: ["YieldCauldron"],
         excludeEvents: [],
+        addresses: {
+          arbitrum: "0x23cc87fbebdd67cce167fa9ec6ad3b7fe3892e30",
+        },
       },
+      // YieldWitch: {
+      //   abis: ["YieldWitch"],
+      //   excludeEvents: [],
+      //   addresses: {
+      //     arbitrum: "0x07C2C74811cB14a5003C3ccff7EC436d504ffFb6",
+      //     // mainnet: "0x08d2F5c96bB1F6BE04B49bcD869d5Af01db4c400",
+      //   },
+      // },
     },
     // aave: {
     //   AavePool: {
     //     abis: ["AavePool"],
     //     excludeEvents: [],
+    //     addresses: {
+    //       arbitrum: "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+    //     },
     //   },
     // },
   },
