@@ -9,6 +9,7 @@
     "graphql:schema.json": "get-graphql-schema --json --header X-Hasura-Admin-Secret=myadminsecretkey http://localhost:8080/v1/graphql > schema.graphql",
     "graphql:codegen": "graphql-codegen --config codegen.ts",
     "start": "ts-node src/index.ts",
+    "dev": "MODE=dev ts-node src/index.ts",
     "generate:client": "ts-node ./src/generate-graphql-queries.ts --input schema.graphql.json > src/queries.ts"
   },
   "author": "",

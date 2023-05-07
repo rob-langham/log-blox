@@ -180,7 +180,10 @@ const root$ = from(_.keys(config.rpcs)).pipe(
                   from(
                     new Array(Math.ceil(rangeSize / batchSize))
                       .fill(0)
-                      .map((__, i) => [i * batchSize, Math.min((i + 1) * batchSize)])
+                      .map((__, i) => [
+                        i * batchSize,
+                        Math.min((i + 1) * batchSize, startHeadBlock) - 1,
+                      ])
                       .map(([start, end]) => [
                         start + lastPersistedBlockNumber,
                         Math.min(startHeadBlock, end + lastPersistedBlockNumber),
