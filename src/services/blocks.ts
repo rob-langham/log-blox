@@ -19,7 +19,7 @@ export const blocks$ = _.memoize((provider: Provider) =>
   }).pipe(
     (src: Observable<number>): Observable<number> =>
       src.pipe(
-        timeout(30e3),
+        timeout(12e3 * 5),
         catchError(() => {
           logger.error("blocks$ timed out, restarting");
           return NEVER;

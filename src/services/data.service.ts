@@ -1,4 +1,7 @@
 import { Client } from "pg";
+import { Logger } from "../logger";
+
+const logger = new Logger(module);
 
 export class DataService {
   private client: Client;
@@ -8,11 +11,10 @@ export class DataService {
   }
 
   async insertBlock(blockHash: string, blockNumber: number): Promise<void> {
-    await this.client.query("INSERT INTO public.blocks (network, id, number) VALUES ($1, $2)", [
-      this.network,
-      blockHash,
-      blockNumber,
-    ]);
+    await this.client.query(
+      "INSERT INTO public.blocks (network, id, number) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+      [this.network, blockHash, blockNumber]
+    );
   }
 
   async upsertRecords(schema: string, table: string, rows: { [columnName: string]: any }[]) {
@@ -33,10 +35,18 @@ export class DataService {
     await this.client.query(sql, [this.network, ...values.flat()]);
   }
 
+  async countUnconfirmedBlocks(): Promise<number> {
+    const result = await this.client.query(
+      'SELECT count(*) as count FROM blocks WHERE "network" = $1 AND confirmed = false',
+      [this.network]
+    );
+    return parseInt(result.rows[0].count);
+  }
+
   async deleteUnconfirmedBlocks(): Promise<void> {
     // find the oldest unconfirmed block and delete all blocks after it
     // some blocks may be confirmed out of order, so we can't just delete all unconfirmed blocks
-    // the impact should be minimal, since we shoulf only need to delete a few blocks at a time
+    // the impact should be minimal, since we should only need to delete a few blocks at a time
     await this.client.query(
       'DELETE FROM blocks WHERE "network" = $1 AND number >= (SELECT min(number) FROM blocks WHERE "network" = $1 AND confirmed = false)',
       [this.network]
@@ -44,17 +54,10 @@ export class DataService {
   }
 
   async confirmBlock(blockHash: string, blockNumber: number): Promise<void> {
-    console.log(`confirming block ${blockNumber} (${blockHash})`);
+    logger.info("confirming block", this.network, blockNumber);
     await this.client.query(
       'UPDATE blocks SET confirmed = true WHERE "network" = $1 AND "id" = $2 AND "number" = $3',
       [this.network, blockHash, blockNumber]
-    );
-  }
-
-  async confirmBlocksBefore(blockNumber: number): Promise<void> {
-    await this.client.query(
-      'UPDATE blocks SET confirmed = true WHERE "network" = $1 AND number <= $2',
-      [this.network, blockNumber]
     );
   }
 

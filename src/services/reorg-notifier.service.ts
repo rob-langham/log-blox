@@ -1,15 +1,23 @@
 import { Provider } from "@ethersproject/providers";
-import { defer, merge, mergeMap, Observable, Subject } from "rxjs";
+import { defer, merge, mergeMap, Observable, of, Subject, timer } from "rxjs";
 import {
+  audit,
   auditTime,
   concatWith,
+  distinctUntilChanged,
+  exhaustMap,
   filter,
   ignoreElements,
   skip,
+  take,
   tap,
   timeInterval,
 } from "rxjs/operators";
 import { DataService } from "./data.service";
+import { Logger } from "../logger";
+import _, { sample } from "lodash";
+
+const logger = new Logger(module);
 
 type ReorgNotification = {
   blockNumber: number;
@@ -19,7 +27,7 @@ type ReorgNotification = {
 
 type ReorgNotifier = {
   reorgs$: Observable<ReorgNotification>;
-  confirmBlock: (value: [number, string]) => void;
+  confirmBlock: (blockNumber: number, blockHash: string) => void;
 };
 
 export function reorgNotifier(
@@ -27,52 +35,42 @@ export function reorgNotifier(
   dataService: DataService,
   provider: Provider
 ): ReorgNotifier {
-  // const blockConfirmer = new Subject<[number, string]>();
   const blockConfirmer = new Subject<[number, string]>();
-  let averageBlockTime = 12; // mainnet default
-
-  //determines average block time
-  const averageBlockTime$ = blocks$.pipe(
-    filter((__, i) => i % 30 === 0),
-    timeInterval(),
-    skip(1),
-    tap((interval) => (averageBlockTime = interval.interval / 1e3 / 30)),
-    tap(() => console.log("averageBlockTime", parseFloat(averageBlockTime.toFixed(4)))),
+  const submitter = new Subject<[number, string]>();
+  const submitter$ = submitter.pipe(
+    distinctUntilChanged<[number, string]>(_.isEqual),
+    tap((x) => blockConfirmer.next(x)),
     ignoreElements()
   );
 
-  const reorgs$ = merge(averageBlockTime$, blockConfirmer).pipe(
+  const reorgs$ = merge(submitter$, blockConfirmer).pipe(
     mergeMap(([blockNumber, blockHash]) => {
-      console.log("checking validity of block", blockNumber, "against hash", blockHash);
       return new Observable<ReorgNotification>((subscriber) => {
         const sub = blocks$
           .pipe(
-            // Check every ~5 blocks to see if the block has been reorged.
-            // When there is a backlog of blocks this might just run once for any given block
-            auditTime(averageBlockTime * 5e3),
-            mergeMap(async (headBlock: number) => {
-              const block = await provider.getBlock(blockNumber);
-
-              if (block.hash === blockHash) {
-                return headBlock;
+            take(1),
+            exhaustMap(async (headBlock: number) => {
+              if (headBlock >= blockNumber + +(process.env.BLOCK_CONFIRMATIONS || "70")) {
+                await dataService.confirmBlock(blockHash, blockNumber);
               } else {
-                subscriber.next({
-                  blockNumber,
-                  oldBlockHash: blockHash,
-                  newBlockHash: block.hash,
-                });
-                throw new Error("reorg");
+                const block = await provider.getBlock(blockNumber);
+                if (block.hash !== blockHash) {
+                  // keep checking it until it's confirmed
+                  blockConfirmer.next([blockNumber, blockHash]);
+                } else {
+                  subscriber.next({
+                    blockNumber,
+                    oldBlockHash: blockHash,
+                    newBlockHash: block.hash,
+                  });
+                  throw new Error("reorg");
+                }
               }
-            }),
-            filter(
-              (checkedBlockNumber) =>
-                checkedBlockNumber <= blockNumber + +(process.env.BLOCK_CONFIRMATIONS || "70")
-            ),
-            concatWith(defer(() => dataService.confirmBlock(blockHash, blockNumber)))
+            })
           )
           .subscribe({
             complete: () => {
-              // not called when error is thrown
+              logger.debug("Block", blockNumber, "confirmed for hash", blockHash);
               subscriber.complete();
             },
           });
@@ -81,9 +79,11 @@ export function reorgNotifier(
       });
     }, 5)
   );
-
   return {
     reorgs$,
-    confirmBlock: blockConfirmer.next.bind(blockConfirmer),
+    confirmBlock: (blockNumber: number, blockHash: string) => {
+      logger.debug("Queuing block for confirmation", blockNumber, blockHash);
+      submitter.next([blockNumber, blockHash]);
+    },
   };
 }

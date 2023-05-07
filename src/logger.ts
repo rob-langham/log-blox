@@ -1,3 +1,5 @@
+import Module from "module";
+
 export const logLevels = {
   trace: 0,
   verbose: 1,
@@ -9,13 +11,14 @@ export const logLevels = {
 } as const;
 export type LogLevel = keyof typeof logLevels;
 export const LOG_LEVELS = Object.keys(logLevels) as LogLevel[];
+import { basename } from "path";
 
 export class Logger {
   private readonly module: string;
   private readonly logLevel: number;
 
-  constructor(logLevel?: LogLevel) {
-    this.module = nameOfModuleThatCalledThisFunction();
+  constructor(module: Module, logLevel?: LogLevel) {
+    this.module = basename(module.filename).replace(/\..*?$/, "");
     this.logLevel =
       logLevels[
         logLevel ??

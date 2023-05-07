@@ -4,7 +4,7 @@ import { Logger } from "../logger";
 import { SchemaService } from "../services/schema.service";
 import { createMapperMetaDataFromAbi, EventOrmMapperMetadata } from "../tools/schema-generator";
 
-const logger = new Logger();
+const logger = new Logger(module);
 
 export interface Config {
   endpoint: string;
@@ -210,7 +210,7 @@ export async function migrate() {
       await runMigration(tableData);
     }
 
-    async function runMigration(tableInfo: typeof tableMetadata[number]) {
+    async function runMigration(tableInfo: (typeof tableMetadata)[number]) {
       const defaultColumns: Parameters<typeof schemaService.createTable>[3] = [
         ["blockHash", "text"],
         ["transactionHash", "text"],

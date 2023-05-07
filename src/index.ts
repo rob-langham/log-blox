@@ -42,7 +42,7 @@ import { DataService } from "./services/data.service";
 import { reorgNotifier } from "./services/reorg-notifier.service";
 import { blocks$ } from "./services/blocks";
 
-export const logger = new Logger();
+export const logger = new Logger(module);
 
 type KeyedEvent = {
   metadataKey: string;
@@ -93,17 +93,21 @@ const root$ = from(_.keys(config.rpcs)).pipe(
             });
 
             async function main() {
-              console.log("starting iteration", iteration);
+              logger.info("Starting iteration", iteration);
 
               const historyComplete$ = new ReplaySubject(1);
 
               // older blocks may not have been confirmed so it's quicker to delete them and start fresh from that point
               //TODO this should be done in a tx that commits when the new blocks are saved
+              logger.info(
+                "Deleting",
+                await dataService.countUnconfirmedBlocks(),
+                "unconfirmed blocks"
+              );
               await dataService.deleteUnconfirmedBlocks();
-              console.log("deleted unconfirmed blocks");
 
               const lastPersistedBlockNumber = await dataService.getLatestBlock();
-              console.log("lastPersistedBlockNumber", lastPersistedBlockNumber);
+              logger.info("lastPersistedBlockNumber", lastPersistedBlockNumber);
 
               const { confirmBlock, reorgs$ } = reorgNotifier(
                 blocks$(provider),
@@ -171,7 +175,7 @@ const root$ = from(_.keys(config.rpcs)).pipe(
                   } as const;
                 });
 
-              const batchSize = 2e3;
+              const batchSize = 1e6;
               const rangeSize =
                 (await firstValueFrom(blocks$(provider))) - lastPersistedBlockNumber;
               const batches$ = of(1).pipe(
@@ -346,15 +350,17 @@ const root$ = from(_.keys(config.rpcs)).pipe(
 
                       const mapper = metadataByEvent[eventName.name];
 
-                      persistor.persist({
-                        dedupe: `${log.blockNumber}`,
-                        type: "batchable",
-                        schema: "public",
-                        table: "blocks",
-                        object: { id: log.blockHash, number: log.blockNumber, confirmed: false },
-                      });
+                      // persistor.persist({
+                      //   dedupe: `${log.blockNumber}`,
+                      //   type: "batchable",
+                      //   schema: "public",
+                      //   table: "blocks",
+                      //   object: { id: log.blockHash, number: log.blockNumber, confirmed: false },
+                      // });
 
-                      confirmBlock([log.blockNumber, log.blockHash]);
+                      await dataService.insertBlock(log.blockHash, log.blockNumber);
+
+                      confirmBlock(log.blockNumber, log.blockHash);
 
                       const bigNumberToString = (value: any) => {
                         return BigNumber.isBigNumber(value) ? value.toBigInt() : value;
